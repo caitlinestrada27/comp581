@@ -1,4 +1,4 @@
-"""Caitlin Estrada (730661469) and Madeline Clark (PID)."""
+"""Caitlin Estrada (730661469) and Madeline Clark (730650946)."""
 
 #!/usr/bin/env pybricks-micropython
 import math 
@@ -12,8 +12,6 @@ from pybricks.media.ev3dev import SoundFile, ImageFile
 
 class MyController:
     def __init__(self):
-        # TODO: Add team members' names and PIDs at the top of main.py.
-
         self.ev3 = EV3Brick()
         self.left_motor = Motor(Port.B)
         self.right_motor = Motor(Port.C)
