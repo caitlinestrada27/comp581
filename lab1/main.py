@@ -1,6 +1,7 @@
+#!/usr/bin/env pybricks-micropython
+
 """Caitlin Estrada (730661469) and Madeline Clark (730650946)."""
 
-#!/usr/bin/env pybricks-micropython
 import math 
 from pybricks.hubs import EV3Brick
 from pybricks.ev3devices import Motor, TouchSensor, UltrasonicSensor
@@ -10,8 +11,8 @@ from pybricks.tools import wait
 class MyController:
     # CALIBRATION CONSTANTS 
     # TODO @Maddie: Tune these constants for our robot.
-    WHEEL_RADIUS = 0.027        # m  (measure your wheel)
-    WHEEL_BASE = 0.0905         # m  (distance between wheel contact points)
+    WHEEL_RADIUS = 0.028        # m  (measure your wheel)
+    WHEEL_BASE = 0.118         # m  (distance between wheel contact points)
     LEFT_DIR = Direction.CLOCKWISE        # flip to COUNTERCLOCKWISE if the
     RIGHT_DIR = Direction.CLOCKWISE       # robot drives backwards
  
@@ -39,8 +40,8 @@ class MyController:
     def __init__(self):
         self.ev3 = EV3Brick()
         # TODO @Maddie: Make sure assembled robot matches the Port assignemnts
-        self.left_motor = Motor(Port.B, self.LEFT_DIRECTION)
-        self.right_motor = Motor(Port.C, self.RIGHT_DIRECTION)
+        self.left_motor = Motor(Port.B, self.LEFT_DIR)
+        self.right_motor = Motor(Port.C, self.RIGHT_DIR)
         self.ultrasonic = UltrasonicSensor(Port.S4)
         self.touch = TouchSensor(Port.S3)
 
@@ -78,7 +79,7 @@ class MyController:
         self.y += d_center * math.sin(mid_theta)
         self.theta += d_theta
         return d_center
-       def ramp(self, target):
+    def ramp(self, target):
         """Limit acceleration (avoids wheel slip); slowing is immediate."""
         if abs(target) <= abs(self.cmd_speed):
             self.cmd_speed = target
