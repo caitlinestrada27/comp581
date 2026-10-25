@@ -53,7 +53,13 @@ class MyController:
         # turn right. Must be < 0.30 m (spec). Smaller ends closer to the wall
         # after the turn, but the front-left corner swings toward the wall
         # during the in-place turn, so don't go too small. TUNE ON THE ROBOT.
-        self.TURN_STANDOFF = 0.15
+        #
+        # The wall distance read right AFTER the turn (shown on the EV3 screen
+        # as "AFTER TURN") should land inside the follow band (0.08 - 0.13 m),
+        # ideally near WALL_TARGET_DIST. If it reads above 0.14 m the robot
+        # starts in TOO_FAR and immediately steers toward the wall. Adjust:
+        #   new TURN_STANDOFF = TURN_STANDOFF - (AFTER TURN reading - 0.105)
+        self.TURN_STANDOFF = 0.12
         # Sanity range for the start-of-run wall measurement (spec: 0.75-1.30 m
         # ahead). Outside this we distrust the reading and use the fallback.
         self.MIN_WALL_DIST = 0.40
@@ -215,6 +221,9 @@ class MyController:
                 self.show_once("AFTER TURN", measured)
                 print("--- POST-TURN WALL DISTANCE: {:.3f} m (target {:.3f} m) ---".format(
                     measured, self.WALL_TARGET_DIST))
+                # Hold the reading on screen long enough to read it while
+                # tuning TURN_STANDOFF (costs 1.5 s of the 90 s budget).
+                wait(1500)
  
                 self.wall_mode = "STRAIGHT"
                 self.last_screen_mode = None
