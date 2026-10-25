@@ -24,24 +24,15 @@ class MyController:
         self.LEFT_DIR = Direction.CLOCKWISE
         self.RIGHT_DIR = Direction.CLOCKWISE
  
-        # left/right are the PHYSICAL wheels (Spring's code had these swapped,
-        # so every left/right sign below was remapped).
+        # left/right are the PHYSICAL wheels.
         self.left_motor = Motor(Port.B, self.LEFT_DIR)
         self.right_motor = Motor(Port.C, self.RIGHT_DIR)
-        self.swivel = Motor(Port.A)  # medium motor carrying the ultrasonic sensor
  
-        self.ultrasonic = UltrasonicSensor(Port.S4)  # FRONT at start, LEFT while following
+        self.ultrasonic = UltrasonicSensor(Port.S4)  # faces LEFT (fixed)
         self.gyro = None
         if USE_GYRO:
             self.gyro = GyroSensor(Port.S1)          # faces UP
         wait(1000)
- 
-        # Swivel angles (motor degrees). Sensor must start facing front.
-        # Flip the sign / change the magnitude to match your gearing.
-        self.swivel.reset_angle(0)
-        self.SWIVEL_FRONT_DEG = 0
-        self.SWIVEL_LEFT_DEG = -90
-        self.SWIVEL_SPEED = 300
  
         self.MAX_FOLLOW_TURN = 45.0
  
@@ -54,19 +45,24 @@ class MyController:
         self.TURN_SPEED = 200
         self.FORWARD_SPEED = 100
  
-        # Stop and turn right when the front ultrasonic reads below this (m).
-        # Spec: must turn at < 0.30 m. Smaller = ends up closer to the wall
-        # after the turn, but the front-left corner swings toward the wall
-        # during the in-place turn, so don't go too small. TUNE ON THE ROBOT.
-        self.TURN_TRIGGER_DIST = 0.20
-        self.TRIGGER_CONFIRM_LOOPS = 3  # consecutive readings, rejects glitches
-        self.close_count = 0
- 
         turn_arc = (math.pi / 2.0) * (self.WHEEL_BASE / 2.0)
         self.TURN_DEG_90 = 1.05 * math.degrees(turn_arc / self.WHEEL_RADIUS)
  
-        self.turn_start_left = 0
-        self.turn_start_right = 0
+        # --- approach (measure once, then dead-reckon) ---
+        # After driving, the wall should be this far from the sensor when we
+        # turn right. Must be < 0.30 m (spec). Smaller ends closer to the wall
+        # after the turn, but the front-left corner swings toward the wall
+        # during the in-place turn, so don't go too small. TUNE ON THE ROBOT.
+        self.TURN_STANDOFF = 0.15
+        # Sanity range for the start-of-run wall measurement (spec: 0.75-1.30 m
+        # ahead). Outside this we distrust the reading and use the fallback.
+        self.MIN_WALL_DIST = 0.40
+        self.MAX_WALL_DIST = 1.60
+        self.FALLBACK_WALL_DIST = 1.00
+        self.drive_target = 0.0
+        self.drive_start_left = 0
+        self.drive_start_right = 0
+ 
         self.settle_counter = 0
         self.follow_dist = 0.0
         self.prev_left = 0
@@ -89,8 +85,7 @@ class MyController:
         self.STRAIGHT_HIGH = 0.13        # hysteresis re-entry from TOO_FAR
  
         # Desired wall distance while following (m). Fixed, NOT measured after
-        # the turn: without the bump/reverse, the post-turn distance can be
-        # near the 0.30 m limit, so we steer toward this value instead.
+        # the turn, so the follow distance doesn't depend on the stand-off.
         self.WALL_TARGET_DIST = 0.105
  
         self.last_screen_mode = None
@@ -103,6 +98,34 @@ class MyController:
     def stop(self):
         self.left_motor.stop()
         self.right_motor.stop()
+ 
+    def rotate(self, right):
+        """Turn 90 degrees in place (right=True -> clockwise), then settle."""
+        start_left = self.left_motor.angle()
+        start_right = self.right_motor.angle()
+        sign = 1 if right else -1
+ 
+        while True:
+            left_change = abs(self.left_motor.angle() - start_left)
+            right_change = abs(self.right_motor.angle() - start_right)
+            if (left_change + right_change) / 2.0 >= self.TURN_DEG_90:
+                break
+            # right turn: left wheel forward, right wheel back
+            self.left_motor.run(sign * self.TURN_SPEED)
+            self.right_motor.run(-sign * self.TURN_SPEED)
+            wait(10)
+ 
+        self.stop()
+        wait(300)
+ 
+    def read_dist(self):
+        """Median of 5 ultrasonic readings, in meters (rejects glitches)."""
+        vals = []
+        for _ in range(5):
+            vals.append(self.ultrasonic.distance())
+            wait(50)
+        vals.sort()
+        return vals[2] / 1000.0
  
     def reset_heading(self):
         """Zero the heading reference (gyro or odometry)."""
@@ -145,64 +168,66 @@ class MyController:
                 self.ev3.screen.print("Press CENTER")
  
                 if Button.CENTER in self.ev3.buttons.pressed():
-                    self.close_count = 0
                     self.wall_mode = "STRAIGHT"
                     self.last_screen_mode = None
-                    self.state = "DRIVE"
+                    self.state = "SCAN"
+ 
+            elif self.state == "SCAN":
+                # Turn right so the left-facing sensor points at the wall,
+                # measure once, then turn back to face the wall.
+                self.rotate(True)
+                wall = self.read_dist()
+                self.last_screen_mode = None
+                self.show_once("WALL AHEAD", wall)
+                print("--- WALL DISTANCE AT START: {:.3f} m ---".format(wall))
+ 
+                if wall < self.MIN_WALL_DIST or wall > self.MAX_WALL_DIST:
+                    print("BAD WALL READING - using fallback {:.2f} m".format(
+                        self.FALLBACK_WALL_DIST))
+                    wall = self.FALLBACK_WALL_DIST
+ 
+                self.rotate(False)
+ 
+                self.drive_target = max(0.0, wall - self.TURN_STANDOFF)
+                self.drive_start_left = self.left_motor.angle()
+                self.drive_start_right = self.right_motor.angle()
+                print("DRIVING {:.3f} m".format(self.drive_target))
+                self.state = "DRIVE"
  
             elif self.state == "DRIVE":
-                # Sensor faces FRONT here, so dist is the distance to the wall.
                 self.left_motor.run(self.APPROACH_SPEED + 1.50)  # straight-line trim
                 self.right_motor.run(self.APPROACH_SPEED)
  
-                if dist < self.TURN_TRIGGER_DIST:
-                    self.close_count += 1
-                else:
-                    self.close_count = 0
+                dl = self.left_motor.angle() - self.drive_start_left
+                dr = self.right_motor.angle() - self.drive_start_right
+                travelled = math.radians((dl + dr) / 2.0) * self.WHEEL_RADIUS
  
-                if self.close_count >= self.TRIGGER_CONFIRM_LOOPS:
+                if travelled >= self.drive_target:
                     self.stop()
-                    print("WALL DETECTED at {:.3f} m - turning right".format(dist))
-                    self.turn_start_left = self.left_motor.angle()
-                    self.turn_start_right = self.right_motor.angle()
-                    self.reset_heading()
+                    print("ARRIVED after {:.3f} m - turning right".format(travelled))
                     self.state = "TURN"
  
             elif self.state == "TURN":
-                left_change = abs(self.left_motor.angle() - self.turn_start_left)
-                right_change = abs(self.right_motor.angle() - self.turn_start_right)
-                turn_amount = (left_change + right_change) / 2.0
+                self.rotate(True)
  
-                if turn_amount < self.TURN_DEG_90:
-                    # turn RIGHT in place: left wheel forward, right wheel back
-                    self.left_motor.run(self.TURN_SPEED)
-                    self.right_motor.run(-self.TURN_SPEED)
-                else:
-                    self.stop()
+                measured = self.read_dist()
+                self.last_screen_mode = None
+                self.show_once("AFTER TURN", measured)
+                print("--- POST-TURN WALL DISTANCE: {:.3f} m (target {:.3f} m) ---".format(
+                    measured, self.WALL_TARGET_DIST))
  
-                    # Point the sensor at the wall (now on our left).
-                    self.swivel.run_target(self.SWIVEL_SPEED, self.SWIVEL_LEFT_DEG)
-                    wait(300)
+                self.wall_mode = "STRAIGHT"
+                self.last_screen_mode = None
  
-                    measured = self.ultrasonic.distance() / 1000.0
-                    self.last_screen_mode = None
-                    self.show_once("AFTER TURN", measured)
-                    print("--- POST-TURN WALL DISTANCE: {:.3f} m (target {:.3f} m) ---".format(
-                        measured, self.WALL_TARGET_DIST))
+                self.prev_left = self.left_motor.angle()
+                self.prev_right = self.right_motor.angle()
+                self.follow_dist = 0.0
  
-                    self.wall_mode = "STRAIGHT"
-                    self.last_screen_mode = None
+                # Heading is measured relative to the wall direction.
+                self.reset_heading()
  
-                    self.prev_left = self.left_motor.angle()
-                    self.prev_right = self.right_motor.angle()
-                    self.follow_dist = 0.0
-                    wait(300)
- 
-                    # Heading is measured relative to the wall direction.
-                    self.reset_heading()
- 
-                    self.state = "SETTLE"
-                    self.settle_counter = 0
+                self.state = "SETTLE"
+                self.settle_counter = 0
  
             elif self.state == "SETTLE":
                 self.left_motor.run(self.FORWARD_SPEED)
@@ -332,14 +357,14 @@ def main():
             robot.stop()
         brick = EV3Brick()
         brick.screen.clear()
+        msg = repr(e)  # includes the exception type, e.g. OSError(19,)
         brick.screen.print("ERROR:")
-        brick.screen.print(type(e).__name__)
-        brick.screen.print(str(e))
-        print("ERROR:", type(e).__name__, str(e))
+        for i in range(0, len(msg), 20):  # the EV3 screen is ~20 chars wide
+            brick.screen.print(msg[i:i + 20])
+        print("ERROR:", msg)
         wait(20000)
         raise
  
  
 if __name__ == "__main__":
     main()
- 
