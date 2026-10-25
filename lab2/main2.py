@@ -1,4 +1,7 @@
 #!/usr/bin/env pybricks-micropython
+
+import math
+
 from pybricks.hubs import EV3Brick
 from pybricks.ev3devices import (Motor, TouchSensor, ColorSensor,
                                  InfraredSensor, UltrasonicSensor, GyroSensor)
@@ -16,7 +19,7 @@ class MyController:
  
         self.ultrasonic = UltrasonicSensor(Port.S4)  # faces LEFT
         self.touch = TouchSensor(Port.S3)            # faces FRONT
-        self.gyro = GyroSensor(Port.S1)              # faces UP
+        # self.gyro = GyroSensor(Port.S1)              # faces UP
         wait(1000)
  
         self.follow_start_angle = 0.0
@@ -44,6 +47,19 @@ class MyController:
         self.follow_dist = 0.0
         self.prev_left = 0
         self.prev_right = 0
+        self.heading_start_left = 0
+        self.heading_start_right = 0
+
+        def get_angle(self):
+            left_change = self.left_motor.angle() - self.heading_start_left
+            right_change = self.right_motor.angle() - self.heading_start_right
+
+            left_dist = math.radians(left_change) * self.WHEEL_RADIUS
+            right_dist = math.radians(right_change) * self.WHEEL_RADIUS
+
+            angle_rad = (right_dist - left_dist) / self.WHEEL_BASE
+
+            return math.degrees(angle_rad)
  
         # Odometry distance at which we stop and beep.
         # Spring (2.0 m wall) used 2.5 here, which was tuned empirically.
@@ -115,7 +131,9 @@ class MyController:
                     self.turn_start_left = self.left_motor.angle()
                     self.turn_start_right = self.right_motor.angle()
                     # Reset once right before the turn starts.
-                    self.gyro.reset_angle(0)
+                    # self.gyro.reset_angle(0)
+                    self.heading_start_left = self.left_motor.angle()
+                    self.heading_start_right = self.right_motor.angle()
                     self.follow_start_angle = 0.0
                     self.state = "TURN"
  
@@ -143,7 +161,9 @@ class MyController:
                     self.follow_dist = 0.0
                     wait(300)
  
-                    self.gyro.reset_angle(0)
+                    # self.gyro.reset_angle(0)
+                    self.heading_start_left = self.left_motor.angle()
+                    self.heading_start_right = self.right_motor.angle()
  
                     self.state = "SETTLE"
                     self.settle_counter = 0
@@ -157,7 +177,8 @@ class MyController:
                     self.state = "FOLLOW"
  
             elif self.state == "FOLLOW":
-                current_angle = self.gyro.angle()
+                current_angle = self.get_angle()
+                # self.gyro.angle() -- replace self.get_angle() with this if using a gyro sensor instead of odometry
                 if abs(current_angle) > self.MAX_FOLLOW_TURN:
                     print("GYRO LIMIT HIT: {:.1f} deg - forcing STRAIGHT".format(current_angle))
                     self.wall_mode = "STRAIGHT"
@@ -224,7 +245,8 @@ class MyController:
                 elif self.wall_mode == "TOO_CLOSE":
                     self.show_once("TOO_CLOSE", dist)
  
-                    angle = self.gyro.angle()
+                    angle = self.get_angle()
+                    # self.gyro.angle() -- replace self.get_angle() with this if using a gyro sensor instead of odometry
                     error = self.reference_dist - dist
                     turn = 1500 * error
                     turn_scale = max(0.2, 1 - abs(angle) / self.MAX_FOLLOW_TURN)
@@ -247,7 +269,8 @@ class MyController:
                     else:
                         turn = 1200 * error
  
-                    angle = self.gyro.angle()
+                    angle = self.get_angle()
+                    # self.gyro.angle() -- replace self.get_angle() with this if using a gyro sensor instead of odometry
  
                     if abs(angle) > 30:
                         turn = turn * 0.5
