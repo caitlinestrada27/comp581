@@ -10,19 +10,31 @@ from pybricks.tools import wait, StopWatch, DataLog
 from pybricks.robotics import DriveBase
 from pybricks.media.ev3dev import SoundFile, ImageFile
 
+# Set to True when the gyro is plugged into S1.
+USE_GYRO = False
+ 
+ 
 class MyController:
     def __init__(self):
         self.ev3 = EV3Brick()
  
         self.left_motor = Motor(Port.C)
         self.right_motor = Motor(Port.B)
+        self.swivel = Motor(Port.A)  # medium motor carrying the ultrasonic sensor
  
-        self.ultrasonic = UltrasonicSensor(Port.S4)  # faces LEFT
-        self.touch = TouchSensor(Port.S3)            # faces FRONT
-        # self.gyro = GyroSensor(Port.S1)              # faces UP
+        self.ultrasonic = UltrasonicSensor(Port.S4)  # FRONT at start, LEFT while following
+        self.gyro = None
+        if USE_GYRO:
+            self.gyro = GyroSensor(Port.S1)          # faces UP
         wait(1000)
  
-        self.follow_start_angle = 0.0
+        # Swivel angles (motor degrees). Sensor must start facing front.
+        # Flip the sign / change the magnitude to match your gearing.
+        self.swivel.reset_angle(0)
+        self.SWIVEL_FRONT_DEG = 0
+        self.SWIVEL_LEFT_DEG = -90
+        self.SWIVEL_SPEED = 300
+ 
         self.MAX_FOLLOW_TURN = 45.0
  
         self.state = "WAITING"
@@ -31,35 +43,28 @@ class MyController:
         self.WHEEL_BASE = 0.127
  
         self.APPROACH_SPEED = 200
-        self.REVERSE_SPEED = 100
         self.TURN_SPEED = 200
         self.FORWARD_SPEED = 100
  
-        self.REVERSE_STEPS = 95
+        # Stop and turn right when the front ultrasonic reads below this (m).
+        # Spec: must turn at < 0.30 m. Smaller = ends up closer to the wall
+        # after the turn, but the front-left corner swings toward the wall
+        # during the in-place turn, so don't go too small. TUNE ON THE ROBOT.
+        self.TURN_TRIGGER_DIST = 0.20
+        self.TRIGGER_CONFIRM_LOOPS = 3  # consecutive readings, rejects glitches
+        self.close_count = 0
  
         turn_arc = (math.pi / 2.0) * (self.WHEEL_BASE / 2.0)
         self.TURN_DEG_90 = 1.05 * math.degrees(turn_arc / self.WHEEL_RADIUS)
  
         self.turn_start_left = 0
         self.turn_start_right = 0
-        self.reverse_counter = 0
         self.settle_counter = 0
         self.follow_dist = 0.0
         self.prev_left = 0
         self.prev_right = 0
         self.heading_start_left = 0
         self.heading_start_right = 0
-
-        def get_angle(self):
-            left_change = self.left_motor.angle() - self.heading_start_left
-            right_change = self.right_motor.angle() - self.heading_start_right
-
-            left_dist = math.radians(left_change) * self.WHEEL_RADIUS
-            right_dist = math.radians(right_change) * self.WHEEL_RADIUS
-
-            angle_rad = (right_dist - left_dist) / self.WHEEL_BASE
-
-            return math.degrees(angle_rad)
  
         # Odometry distance at which we stop and beep.
         # Spring (2.0 m wall) used 2.5 here, which was tuned empirically.
@@ -75,7 +80,11 @@ class MyController:
         self.STRAIGHT_LOW = 0.08         # hysteresis re-entry from TOO_CLOSE
         self.STRAIGHT_HIGH = 0.13        # hysteresis re-entry from TOO_FAR
  
-        self.reference_dist = 0.0
+        # Desired wall distance while following (m). Fixed, NOT measured after
+        # the turn: without the bump/reverse, the post-turn distance can be
+        # near the 0.30 m limit, so we steer toward this value instead.
+        self.WALL_TARGET_DIST = 0.105
+ 
         self.last_screen_mode = None
         self.wall_mode = "STRAIGHT"
  
@@ -86,6 +95,28 @@ class MyController:
     def stop(self):
         self.left_motor.stop()
         self.right_motor.stop()
+ 
+    def reset_heading(self):
+        """Zero the heading reference (gyro or odometry)."""
+        if self.gyro is not None:
+            self.gyro.reset_angle(0)
+        self.heading_start_left = self.left_motor.angle()
+        self.heading_start_right = self.right_motor.angle()
+ 
+    def get_angle(self):
+        """Heading change in degrees since reset_heading(), positive = clockwise
+        (same sign convention as the gyro)."""
+        if self.gyro is not None:
+            return self.gyro.angle()
+ 
+        left_change = self.left_motor.angle() - self.heading_start_left
+        right_change = self.right_motor.angle() - self.heading_start_right
+ 
+        left_dist = math.radians(left_change) * self.WHEEL_RADIUS
+        right_dist = math.radians(right_change) * self.WHEEL_RADIUS
+ 
+        angle_rad = (left_dist - right_dist) / self.WHEEL_BASE
+        return math.degrees(angle_rad)
  
     def show_once(self, label, dist):
         if self.last_screen_mode != label:
@@ -106,35 +137,27 @@ class MyController:
                 self.ev3.screen.print("Press CENTER")
  
                 if Button.CENTER in self.ev3.buttons.pressed():
-                    self.reverse_counter = 0
+                    self.close_count = 0
                     self.wall_mode = "STRAIGHT"
                     self.last_screen_mode = None
                     self.state = "DRIVE"
  
             elif self.state == "DRIVE":
+                # Sensor faces FRONT here, so dist is the distance to the wall.
                 self.left_motor.run(self.APPROACH_SPEED)
                 self.right_motor.run(self.APPROACH_SPEED + 1.50)  # straight-line trim
  
-                if self.touch.pressed():
+                if dist < self.TURN_TRIGGER_DIST:
+                    self.close_count += 1
+                else:
+                    self.close_count = 0
+ 
+                if self.close_count >= self.TRIGGER_CONFIRM_LOOPS:
                     self.stop()
-                    self.reverse_counter = 0
-                    self.state = "REVERSE"
- 
-            elif self.state == "REVERSE":
-                self.left_motor.run(-self.REVERSE_SPEED)
-                self.right_motor.run(-self.REVERSE_SPEED)
- 
-                self.reverse_counter += 1
- 
-                if self.reverse_counter >= self.REVERSE_STEPS:
-                    self.stop()
+                    print("WALL DETECTED at {:.3f} m - turning right".format(dist))
                     self.turn_start_left = self.left_motor.angle()
                     self.turn_start_right = self.right_motor.angle()
-                    # Reset once right before the turn starts.
-                    # self.gyro.reset_angle(0)
-                    self.heading_start_left = self.left_motor.angle()
-                    self.heading_start_right = self.right_motor.angle()
-                    self.follow_start_angle = 0.0
+                    self.reset_heading()
                     self.state = "TURN"
  
             elif self.state == "TURN":
@@ -147,11 +170,16 @@ class MyController:
                     self.right_motor.run(self.TURN_SPEED)
                 else:
                     self.stop()
-                    self.reference_dist = dist
+ 
+                    # Point the sensor at the wall (now on our left).
+                    self.swivel.run_target(self.SWIVEL_SPEED, self.SWIVEL_LEFT_DEG)
+                    wait(300)
+ 
+                    measured = self.ultrasonic.distance() / 1000.0
                     self.last_screen_mode = None
-                    self.show_once("REFERENCE", dist)
-                    print("--- REFERENCE DISTANCE SET: {:.3f} m ---".format(self.reference_dist))
-                    wait(1500)
+                    self.show_once("AFTER TURN", measured)
+                    print("--- POST-TURN WALL DISTANCE: {:.3f} m (target {:.3f} m) ---".format(
+                        measured, self.WALL_TARGET_DIST))
  
                     self.wall_mode = "STRAIGHT"
                     self.last_screen_mode = None
@@ -161,9 +189,8 @@ class MyController:
                     self.follow_dist = 0.0
                     wait(300)
  
-                    # self.gyro.reset_angle(0)
-                    self.heading_start_left = self.left_motor.angle()
-                    self.heading_start_right = self.right_motor.angle()
+                    # Heading is measured relative to the wall direction.
+                    self.reset_heading()
  
                     self.state = "SETTLE"
                     self.settle_counter = 0
@@ -178,9 +205,8 @@ class MyController:
  
             elif self.state == "FOLLOW":
                 current_angle = self.get_angle()
-                # self.gyro.angle() -- replace self.get_angle() with this if using a gyro sensor instead of odometry
                 if abs(current_angle) > self.MAX_FOLLOW_TURN:
-                    print("GYRO LIMIT HIT: {:.1f} deg - forcing STRAIGHT".format(current_angle))
+                    print("HEADING LIMIT HIT: {:.1f} deg - forcing STRAIGHT".format(current_angle))
                     self.wall_mode = "STRAIGHT"
                     self.too_far_counter = 0
  
@@ -239,15 +265,14 @@ class MyController:
                     self.straight_print_counter += 1
                     if self.straight_print_counter >= self.STRAIGHT_PRINT_EVERY:
                         self.straight_print_counter = 0
-                        print("STRAIGHT: {:.3f} m (ref: {:.3f} m)".format(
-                            dist, self.reference_dist))
+                        print("STRAIGHT: {:.3f} m (target: {:.3f} m)".format(
+                            dist, self.WALL_TARGET_DIST))
  
                 elif self.wall_mode == "TOO_CLOSE":
                     self.show_once("TOO_CLOSE", dist)
  
                     angle = self.get_angle()
-                    # self.gyro.angle() -- replace self.get_angle() with this if using a gyro sensor instead of odometry
-                    error = self.reference_dist - dist
+                    error = self.WALL_TARGET_DIST - dist
                     turn = 1500 * error
                     turn_scale = max(0.2, 1 - abs(angle) / self.MAX_FOLLOW_TURN)
                     turn = turn * turn_scale
@@ -262,7 +287,7 @@ class MyController:
  
                 elif self.wall_mode == "TOO_FAR":
                     self.show_once("TOO_FAR", dist)
-                    error = dist - self.reference_dist
+                    error = dist - self.WALL_TARGET_DIST
  
                     if error < 0.01:
                         turn = 0
@@ -270,7 +295,6 @@ class MyController:
                         turn = 1200 * error
  
                     angle = self.get_angle()
-                    # self.gyro.angle() -- replace self.get_angle() with this if using a gyro sensor instead of odometry
  
                     if abs(angle) > 30:
                         turn = turn * 0.5
