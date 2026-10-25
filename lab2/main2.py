@@ -18,8 +18,16 @@ class MyController:
     def __init__(self):
         self.ev3 = EV3Brick()
  
-        self.left_motor = Motor(Port.C)
-        self.right_motor = Motor(Port.B)
+        # Motor directions. Last semester's code passed no direction (default
+        # CLOCKWISE on both). If the robot drives backward or spins in place on
+        # a forward command, flip the wrong one to Direction.COUNTERCLOCKWISE.
+        self.LEFT_DIR = Direction.CLOCKWISE
+        self.RIGHT_DIR = Direction.CLOCKWISE
+ 
+        # left/right are the PHYSICAL wheels (Spring's code had these swapped,
+        # so every left/right sign below was remapped).
+        self.left_motor = Motor(Port.B, self.LEFT_DIR)
+        self.right_motor = Motor(Port.C, self.RIGHT_DIR)
         self.swivel = Motor(Port.A)  # medium motor carrying the ultrasonic sensor
  
         self.ultrasonic = UltrasonicSensor(Port.S4)  # FRONT at start, LEFT while following
@@ -144,8 +152,8 @@ class MyController:
  
             elif self.state == "DRIVE":
                 # Sensor faces FRONT here, so dist is the distance to the wall.
-                self.left_motor.run(self.APPROACH_SPEED)
-                self.right_motor.run(self.APPROACH_SPEED + 1.50)  # straight-line trim
+                self.left_motor.run(self.APPROACH_SPEED + 1.50)  # straight-line trim
+                self.right_motor.run(self.APPROACH_SPEED)
  
                 if dist < self.TURN_TRIGGER_DIST:
                     self.close_count += 1
@@ -166,8 +174,9 @@ class MyController:
                 turn_amount = (left_change + right_change) / 2.0
  
                 if turn_amount < self.TURN_DEG_90:
-                    self.left_motor.run(-self.TURN_SPEED)
-                    self.right_motor.run(self.TURN_SPEED)
+                    # turn RIGHT in place: left wheel forward, right wheel back
+                    self.left_motor.run(self.TURN_SPEED)
+                    self.right_motor.run(-self.TURN_SPEED)
                 else:
                     self.stop()
  
@@ -259,8 +268,8 @@ class MyController:
                 # motor commands
                 if self.wall_mode == "STRAIGHT":
                     self.show_once("STRAIGHT", dist)
-                    self.left_motor.run(self.FORWARD_SPEED)
-                    self.right_motor.run(self.FORWARD_SPEED + 2)
+                    self.left_motor.run(self.FORWARD_SPEED + 2)  # straight-line trim
+                    self.right_motor.run(self.FORWARD_SPEED)
  
                     self.straight_print_counter += 1
                     if self.straight_print_counter >= self.STRAIGHT_PRINT_EVERY:
@@ -281,9 +290,11 @@ class MyController:
                     if abs(angle) > 30:
                         turn = turn * 0.8
  
+                    # too close to the wall (on our left): steer RIGHT,
+                    # left wheel faster
                     base_speed = 80
-                    self.left_motor.run(base_speed - turn)
-                    self.right_motor.run(base_speed + turn)
+                    self.left_motor.run(base_speed + turn)
+                    self.right_motor.run(base_speed - turn)
  
                 elif self.wall_mode == "TOO_FAR":
                     self.show_once("TOO_FAR", dist)
@@ -303,15 +314,32 @@ class MyController:
                     turn = turn * turn_scale
                     turn = max(min(turn, 60), 0)
  
+                    # too far from the wall (on our left): steer LEFT,
+                    # right wheel faster
                     base_speed = 80
-                    self.left_motor.run(base_speed + turn)
-                    self.right_motor.run(base_speed - turn)
+                    self.left_motor.run(base_speed - turn)
+                    self.right_motor.run(base_speed + turn)
  
  
 def main():
-    robot = MyController()
-    robot.run()
+    robot = None
+    try:
+        robot = MyController()
+        robot.run()
+    except Exception as e:
+        # Show the real error on the EV3 screen (the console only says "exit code 1").
+        if robot is not None:
+            robot.stop()
+        brick = EV3Brick()
+        brick.screen.clear()
+        brick.screen.print("ERROR:")
+        brick.screen.print(type(e).__name__)
+        brick.screen.print(str(e))
+        print("ERROR:", type(e).__name__, str(e))
+        wait(20000)
+        raise
  
  
 if __name__ == "__main__":
     main()
+ 
