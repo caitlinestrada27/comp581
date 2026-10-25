@@ -235,6 +235,7 @@ class MyController:
                 # Heading is measured relative to the wall direction.
                 self.reset_heading()
  
+                print("STATE: SETTLE (driving straight briefly before following)")
                 self.state = "SETTLE"
                 self.settle_counter = 0
  
@@ -244,6 +245,9 @@ class MyController:
  
                 self.settle_counter += 1
                 if self.settle_counter > 20:
+                    print("STATE: FOLLOW (dist now {:.3f} m)".format(dist))
+                    self.ev3.screen.clear()
+                    self.ev3.screen.print("FOLLOWING")
                     self.state = "FOLLOW"
  
             elif self.state == "FOLLOW":
@@ -377,3 +381,4 @@ def main():
  
 if __name__ == "__main__":
     main()
+ 
