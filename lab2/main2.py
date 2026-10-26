@@ -7,11 +7,10 @@ from pybricks.ev3devices import (Motor, TouchSensor, ColorSensor,
                                  InfraredSensor, UltrasonicSensor, GyroSensor)
 from pybricks.parameters import Port, Stop, Direction, Button, Color
 from pybricks.tools import wait, StopWatch, DataLog
-from pybricks.robotics import DriveBase
 from pybricks.media.ev3dev import SoundFile, ImageFile
 
 # Set to True when the gyro is plugged into S1.
-USE_GYRO = False
+USE_GYRO = True
  
  
 class MyController:
@@ -234,6 +233,7 @@ class MyController:
  
                 # Heading is measured relative to the wall direction.
                 self.reset_heading()
+                print("HEADING RESET SUCCESSFUL")
  
                 print("STATE: SETTLE (driving straight briefly before following)")
                 self.state = "SETTLE"
