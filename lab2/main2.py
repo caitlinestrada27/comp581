@@ -1,5 +1,7 @@
 #!/usr/bin/env pybricks-micropython
 
+"""Caitlin Estrada (730661469) and Madeline Clark (730650946)."""
+
 import math
 from pybricks.hubs import EV3Brick
 from pybricks.ev3devices import Motor, UltrasonicSensor, GyroSensor
