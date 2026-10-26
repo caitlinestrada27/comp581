@@ -63,6 +63,8 @@ class MyController:
         self.last_report_counter = 0
         self.filtered_dist = None
         self.bad_readings = 0
+        self.waiting_screen_shown = False
+        print("INITIALIZED - waiting for EV3 CENTER button")
 
     def stop(self):
         self.left_motor.stop()
@@ -134,12 +136,21 @@ class MyController:
             wait(20)
 
             if self.state == "WAITING":
-                self.stop()
-                self.ev3.screen.clear()
-                self.ev3.screen.print("Press CENTER")
-                if Button.CENTER in self.ev3.buttons.pressed():
+                if not self.waiting_screen_shown:
+                    self.stop()
+                    self.ev3.screen.clear()
+                    self.ev3.screen.print("READY")
+                    self.ev3.screen.print("Press CENTER")
+                    self.waiting_screen_shown = True
+                    print("READY: press center button on EV3 brick")
+                buttons = self.ev3.buttons.pressed()
+                if Button.CENTER in buttons:
+                    print("CENTER DETECTED - starting scan")
+                    self.ev3.screen.clear()
+                    self.ev3.screen.print("STARTING")
                     self.last_screen_mode = None
                     self.state = "SCAN"
+                    wait(250)  # debounce, and make STARTING readable
 
             elif self.state == "SCAN":
                 # Turn right so left-facing sensor points at front wall.
@@ -271,13 +282,16 @@ def main():
     except Exception as e:
         if robot is not None:
             robot.stop()
-        brick = EV3Brick()
-        brick.screen.clear()
         msg = repr(e)
-        brick.screen.print("ERROR:")
-        for i in range(0, len(msg), 20):
-            brick.screen.print(msg[i:i + 20])
         print("ERROR:", msg)
+        try:
+            brick = robot.ev3 if robot is not None else EV3Brick()
+            brick.screen.clear()
+            brick.screen.print("ERROR:")
+            for i in range(0, len(msg), 20):
+                brick.screen.print(msg[i:i + 20])
+        except Exception as display_error:
+            print("Could not show error on brick:", repr(display_error))
         wait(20000)
         raise
 
