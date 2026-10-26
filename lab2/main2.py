@@ -31,8 +31,9 @@ class MyController:
 
         # Initial wall is measured by turning right, looking left, then
         # turning back. We drive by encoder distance since sensor faces left.
-        # 0.20m gives clearance before the final right turn (< 0.30m).
-        self.TURN_STANDOFF = 0.20
+        # Previous commanded 0.20m stopped ~0.30m physically.
+        # Compensate by driving another ~0.10m; verify measured clearance.
+        self.TURN_STANDOFF = 0.10  # empirical correction: 20cm command stopped ~30cm
         self.MIN_WALL_DIST = 0.40
         self.MAX_WALL_DIST = 1.60
         self.FALLBACK_WALL_DIST = 1.00
@@ -42,15 +43,16 @@ class MyController:
 
         # Left wall desired distance and gentle heading-feedback controller.
         self.WALL_TARGET_DIST = 0.105
-        self.DISTANCE_GAIN = 100.0   # deg heading commanded per meter error
-        self.HEADING_GAIN = 3.0      # motor deg/s per deg heading error
-        self.MAX_FOLLOW_TURN = 15.0  # max commanded heading from wall direction
-        self.MAX_STEERING = 20.0     # max difference from base wheel speed
-        self.HEADING_SAFETY_LIMIT = 50.0  # stop instead of spiraling
+        self.DISTANCE_GAIN = 180.0   # deg heading commanded per meter error
+        self.HEADING_GAIN = 4.0      # motor deg/s per deg heading error
+        self.MAX_FOLLOW_TURN = 22.0  # max commanded heading from wall direction
+        self.MAX_STEERING = 35.0     # max difference from base wheel speed
+        self.HEADING_SAFETY_LIMIT = 60.0  # stop instead of spiraling
 
-        # Original stopping distance retained for your course setup.
-        # Calibrate this against 2.2 m of actual distance along the wall.
-        self.FOLLOW_TARGET = 2.75
+        # Target actual forward progress along the original wall direction,
+        # not the older empirically tuned 2.75m wheel path.
+        # Verify against markings on the floor; wheel slip creates errors.
+        self.FOLLOW_TARGET = 2.20
         self.follow_dist = 0.0
         self.prev_left = 0
         self.prev_right = 0
@@ -127,7 +129,8 @@ class MyController:
         self.stop()
         self.ev3.screen.clear()
         self.ev3.screen.print(reason)
-        print("STOP:", reason)
+        self.ev3.screen.print("{:.2f} m".format(self.follow_dist))
+        print("STOP:", reason, "distance:", self.follow_dist)
         self.ev3.speaker.beep(frequency=440, duration=400)
         self.state = "DONE"
 
@@ -167,7 +170,7 @@ class MyController:
                 self.drive_target = max(0.0, wall - self.TURN_STANDOFF)
                 self.drive_start_left = self.left_motor.angle()
                 self.drive_start_right = self.right_motor.angle()
-                print("DRIVING {:.3f} m to 20cm standoff".format(self.drive_target))
+                print("DRIVING {:.3f} m (approach calibration 10cm)".format(self.drive_target))
                 self.state = "DRIVE"
 
             elif self.state == "DRIVE":
@@ -219,46 +222,55 @@ class MyController:
                 self.prev_right = right_now
                 d_left = math.radians(delta_left) * self.WHEEL_RADIUS
                 d_right = math.radians(delta_right) * self.WHEEL_RADIUS
-                self.follow_dist += max(0.0, (d_left + d_right) / 2.0)
+                # Project movement onto the original wall direction.
+                # This excludes extra distance from steering/corrections.
+                forward_motion = (d_left + d_right) / 2.0
+                heading_rad = math.radians(self.get_angle())
+                self.follow_dist += max(0.0, forward_motion * math.cos(heading_rad))
                 if self.follow_dist >= self.FOLLOW_TARGET:
                     self.halt("COMPLETE")
                     break
 
                 raw_dist = self.ultrasonic.distance() / 1000.0
-                # Reject missing/unplausible wall readings; don't endlessly
-                # turn left if the wall disappears from the sensor's view.
-                if raw_dist <= 0.0 or raw_dist > 0.50:
-                    self.bad_readings += 1
-                    self.stop()
-                    if self.bad_readings >= 10:
-                        self.halt("WALL LOST")
-                    continue
-                self.bad_readings = 0
-                if self.filtered_dist is None:
-                    self.filtered_dist = raw_dist
-                else:
-                    self.filtered_dist = 0.7 * self.filtered_dist + 0.3 * raw_dist
-                dist = self.filtered_dist
-
                 angle = self.get_angle()
                 if abs(angle) >= self.HEADING_SAFETY_LIMIT:
                     self.halt("HEADING LIMIT")
                     continue
 
-                # Positive error = left wall too far away; turn LEFT
-                # (negative desired heading). Negative error = turn RIGHT.
-                error = dist - self.WALL_TARGET_DIST
-                desired_angle = -self.DISTANCE_GAIN * error
-                desired_angle = max(-self.MAX_FOLLOW_TURN,
-                                    min(self.MAX_FOLLOW_TURN, desired_angle))
+                # Missing ultrasonic returns are common near openings/corners.
+                # Do NOT end a run before 2.2m just because the wall is lost.
+                # While missing, return to the original parallel heading.
+                valid_wall = 0.02 <= raw_dist <= 0.50
+                if valid_wall:
+                    self.bad_readings = 0
+                    if self.filtered_dist is None:
+                        self.filtered_dist = raw_dist
+                    else:
+                        # React faster to a wall that moves away.
+                        self.filtered_dist = (0.35 * self.filtered_dist
+                                              + 0.65 * raw_dist)
+                    dist = self.filtered_dist
+                    error = dist - self.WALL_TARGET_DIST
+                    desired_angle = -self.DISTANCE_GAIN * error
+                    desired_angle = max(-self.MAX_FOLLOW_TURN,
+                                        min(self.MAX_FOLLOW_TURN, desired_angle))
+                else:
+                    self.bad_readings += 1
+                    dist = raw_dist
+                    self.filtered_dist = None
+                    desired_angle = 0.0
+                    if self.bad_readings == 1:
+                        print("WALL NOT SEEN: continuing until 2.20m")
+
                 steering = self.HEADING_GAIN * (desired_angle - angle)
                 steering = max(-self.MAX_STEERING,
                                min(self.MAX_STEERING, steering))
-                # Positive steering turns RIGHT; negative turns LEFT.
                 self.left_motor.run(self.FORWARD_SPEED + steering)
                 self.right_motor.run(self.FORWARD_SPEED - steering)
 
-                if dist > 0.14:
+                if not valid_wall:
+                    label = "WALL LOST"
+                elif dist > 0.14:
                     label = "TOO_FAR"
                 elif dist < 0.07:
                     label = "TOO_CLOSE"
