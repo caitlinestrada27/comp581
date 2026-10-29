@@ -74,6 +74,19 @@ class MyController:
         self.LOST_TIMEOUT_MS = 4000  # give up searching after this long
         self.lost_timer = None
  
+        # Gentle approach: right after the turn the robot may be far from the
+        # wall. Until it first gets within ACQUIRE_DIST, limit how steeply it
+        # may angle toward the wall. (Ultrasonic sensors also lose the wall
+        # when the beam hits it at a steep angle, which looks like "wall lost".)
+        self.APPROACH_MAX_TURN = 25.0   # max heading toward wall while far
+        self.ACQUIRE_DIST = 0.18        # meters; "close enough" to relax limit
+        self.acquired = False
+        # If the wall vanishes while we were already very close and angled
+        # toward it, the robot is nosing into the wall: turn AWAY, not toward.
+        self.CLOSE_LOST_DIST = 0.15     # meters
+        self.CLOSE_LOST_ANGLE = -25.0   # degrees (negative = angled left)
+        self.last_valid_dist = None
+ 
         # Original stopping distance retained for your course setup.
         # Calibrate this against 2.2 m of actual distance along the wall.
         self.FOLLOW_TARGET = 2.75
@@ -252,6 +265,8 @@ class MyController:
                 self.filtered_dist = None
                 self.bad_readings = 0
                 self.lost_timer = None
+                self.acquired = False
+                self.last_valid_dist = None
                 self.settle_counter = 0
                 self.state = "SETTLE"
  
@@ -294,12 +309,23 @@ class MyController:
                     if self.lost_timer.time() > self.LOST_TIMEOUT_MS:
                         self.halt("WALL LOST")
                         continue
-                    if abs(self.get_angle()) >= self.HEADING_SAFETY_LIMIT:
+                    lost_angle = self.get_angle()
+                    if abs(lost_angle) >= self.HEADING_SAFETY_LIMIT:
                         self.halt("HEADING LIMIT")
                         continue
-                    self.left_motor.run(self.FORWARD_SPEED - self.LOST_ARC)
-                    self.right_motor.run(self.FORWARD_SPEED + self.LOST_ARC)
-                    self.show_once("SEARCH LEFT", raw_dist)
+                    nosing_in = (self.last_valid_dist is not None
+                                 and self.last_valid_dist < self.CLOSE_LOST_DIST
+                                 and lost_angle < self.CLOSE_LOST_ANGLE)
+                    if nosing_in:
+                        # Was close and angled into the wall: straighten out.
+                        self.left_motor.run(self.FORWARD_SPEED + self.LOST_ARC)
+                        self.right_motor.run(self.FORWARD_SPEED - self.LOST_ARC)
+                        self.show_once("SEARCH RIGHT", raw_dist)
+                    else:
+                        # Wall curved away: arc LEFT to find it again.
+                        self.left_motor.run(self.FORWARD_SPEED - self.LOST_ARC)
+                        self.right_motor.run(self.FORWARD_SPEED + self.LOST_ARC)
+                        self.show_once("SEARCH LEFT", raw_dist)
                     continue
                 self.lost_timer = None
                 self.bad_readings = 0
@@ -309,6 +335,9 @@ class MyController:
                     # Less smoothing = less lag when the wall curves away.
                     self.filtered_dist = 0.5 * self.filtered_dist + 0.5 * raw_dist
                 dist = self.filtered_dist
+                self.last_valid_dist = dist
+                if dist <= self.ACQUIRE_DIST:
+                    self.acquired = True
  
                 angle = self.get_angle()
                 if abs(angle) >= self.HEADING_SAFETY_LIMIT:
@@ -319,8 +348,9 @@ class MyController:
                 # (negative desired heading). Negative error = turn RIGHT.
                 error = dist - self.WALL_TARGET_DIST
                 desired_angle = -self.DISTANCE_GAIN * error
-                desired_angle = max(-self.MAX_FOLLOW_TURN,
-                                    min(self.MAX_FOLLOW_TURN, desired_angle))
+                max_turn = (self.MAX_FOLLOW_TURN if self.acquired
+                            else self.APPROACH_MAX_TURN)
+                desired_angle = max(-max_turn, min(max_turn, desired_angle))
                 steering = self.HEADING_GAIN * (desired_angle - angle)
                 steering = max(-self.MAX_STEERING,
                                min(self.MAX_STEERING, steering))
