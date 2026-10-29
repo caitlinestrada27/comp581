@@ -20,14 +20,14 @@ class MyController:
         wait(1000)
 
         # Verify these two physical dimensions on the actual robot.
-        self.WHEEL_RADIUS = 0.03175     # meters
+        self.WHEEL_RADIUS = 0.028     # meters
         self.WHEEL_BASE = 0.127        # meters between wheel contact tracks
         self.APPROACH_SPEED = 200      # motor degrees / second
         self.TURN_SPEED = 200
         self.FORWARD_SPEED = 100
 
         turn_arc = (math.pi / 2.0) * (self.WHEEL_BASE / 2.0)
-        self.TURN_DEG_90 = 1.05 * math.degrees(turn_arc / self.WHEEL_RADIUS)
+        self.TURN_DEG_90 = 1.00 * math.degrees(turn_arc / self.WHEEL_RADIUS)
 
         # Initial wall is measured by turning right, looking left, then
         # turning back. We drive by encoder distance since sensor faces left.
