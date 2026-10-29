@@ -42,8 +42,12 @@ class MyController:
  
         # Initial wall is measured by turning right, looking left, then
         # turning back. We drive by encoder distance since sensor faces left.
-        # 0.20m gives clearance before the final right turn (< 0.30m).
-        self.TURN_STANDOFF = 0.20
+        # The robot was turning ~30cm from the wall with 0.20, so the sensor's
+        # reading is ~10cm longer than the gap to the front of the robot.
+        # 0.075 should give ~17cm at the turn. If the robot clips the wall
+        # while turning, raise this a bit (0.01-0.02); if it turns too early,
+        # lower it.
+        self.TURN_STANDOFF = 0.075
         self.MIN_WALL_DIST = 0.40
         self.MAX_WALL_DIST = 1.60
         self.FALLBACK_WALL_DIST = 1.00
@@ -53,16 +57,20 @@ class MyController:
  
         # Left wall desired distance and gentle heading-feedback controller.
         self.WALL_TARGET_DIST = 0.105
-        self.DISTANCE_GAIN = 200.0   # deg heading commanded per meter error
+        self.DISTANCE_GAIN = 300.0   # deg heading commanded per meter error
         self.HEADING_GAIN = 3.0      # motor deg/s per deg heading error
-        self.MAX_FOLLOW_TURN = 35.0  # max commanded heading (wall curving away)
-        self.MAX_STEERING = 40.0     # max difference from base wheel speed
+        self.MAX_FOLLOW_TURN = 60.0  # max commanded heading (wall curving away)
+        self.MAX_STEERING = 60.0     # max difference from base wheel speed
         self.HEADING_SAFETY_LIMIT = 100.0  # stop instead of spiraling
+        # Slow down when far from the wall so the robot can turn tighter
+        # (full slow-down at FAR_SLOW_ERR meters of error).
+        self.FAR_SLOW_ERR = 0.15
+        self.FAR_SLOW_FACTOR = 0.5   # speed multiplier when fully "far"
  
         # Wall-lost recovery: if the wall curves away out of sensor range,
         # keep moving and arc LEFT to find it again instead of stopping.
         self.MAX_VALID_DIST = 0.50   # readings beyond this = wall out of range
-        self.LOST_ARC = 35.0         # motor deg/s added/removed to arc left
+        self.LOST_ARC = 60.0         # motor deg/s added/removed to arc left
         self.LOST_TIMEOUT_MS = 4000  # give up searching after this long
         self.lost_timer = None
  
@@ -217,7 +225,7 @@ class MyController:
                 self.drive_target = max(0.0, wall - self.TURN_STANDOFF)
                 self.drive_start_left = self.left_motor.angle()
                 self.drive_start_right = self.right_motor.angle()
-                print("DRIVING {:.3f} m to 20cm standoff".format(self.drive_target))
+                print("DRIVING {:.3f} m to standoff".format(self.drive_target))
                 self.state = "DRIVE"
  
             elif self.state == "DRIVE":
@@ -298,7 +306,8 @@ class MyController:
                 if self.filtered_dist is None:
                     self.filtered_dist = raw_dist
                 else:
-                    self.filtered_dist = 0.7 * self.filtered_dist + 0.3 * raw_dist
+                    # Less smoothing = less lag when the wall curves away.
+                    self.filtered_dist = 0.5 * self.filtered_dist + 0.5 * raw_dist
                 dist = self.filtered_dist
  
                 angle = self.get_angle()
@@ -316,8 +325,12 @@ class MyController:
                 steering = max(-self.MAX_STEERING,
                                min(self.MAX_STEERING, steering))
                 # Positive steering turns RIGHT; negative turns LEFT.
-                self.left_motor.run(self.FORWARD_SPEED + steering)
-                self.right_motor.run(self.FORWARD_SPEED - steering)
+                # Slow down when too far from the wall to tighten the turn.
+                far = max(0.0, min(1.0, error / self.FAR_SLOW_ERR))
+                base = self.FORWARD_SPEED * (
+                    1.0 - (1.0 - self.FAR_SLOW_FACTOR) * far)
+                self.left_motor.run(base + steering)
+                self.right_motor.run(base - steering)
  
                 if dist > 0.14:
                     label = "TOO_FAR"
@@ -356,3 +369,4 @@ def main():
  
 if __name__ == "__main__":
     main()
+ 
