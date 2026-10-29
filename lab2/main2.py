@@ -20,14 +20,14 @@ class MyController:
         wait(1000)
 
         # Verify these two physical dimensions on the actual robot.
-        self.WHEEL_RADIUS = 0.030     # meters
+        self.WHEEL_RADIUS = 0.028     # meters
         self.WHEEL_BASE = 0.127        # meters between wheel contact tracks
         self.APPROACH_SPEED = 200      # motor degrees / second
         self.TURN_SPEED = 200
         self.FORWARD_SPEED = 100
 
         turn_arc = (math.pi / 2.0) * (self.WHEEL_BASE / 2.0)
-        self.TURN_DEG_90 = 1.05 * math.degrees(turn_arc / self.WHEEL_RADIUS)
+        self.TURN_DEG_90 = 1.00 * math.degrees(turn_arc / self.WHEEL_RADIUS)
 
         # Initial wall is measured by turning right, looking left, then
         # turning back. We drive by encoder distance since sensor faces left.
@@ -43,11 +43,10 @@ class MyController:
 
         # Left wall desired distance and gentle heading-feedback controller.
         self.WALL_TARGET_DIST = 0.105
-        self.WALL_DEADBAND = 0.015  # ignore errors within +/- 1.5 cm
-        self.DISTANCE_GAIN = 120.0   # deg heading commanded per meter error
-        self.HEADING_GAIN = 3.0      # motor deg/s per deg heading error
-        self.MAX_FOLLOW_TURN = 15.0  # max commanded heading from wall direction
-        self.MAX_STEERING = 20.0     # max difference from base wheel speed
+        self.DISTANCE_GAIN = 180.0   # deg heading commanded per meter error
+        self.HEADING_GAIN = 4.0      # motor deg/s per deg heading error
+        self.MAX_FOLLOW_TURN = 22.0  # max commanded heading from wall direction
+        self.MAX_STEERING = 35.0     # max difference from base wheel speed
         self.HEADING_SAFETY_LIMIT = 60.0  # stop instead of spiraling
 
         # Target actual forward progress along the original wall direction,
@@ -248,12 +247,10 @@ class MyController:
                         self.filtered_dist = raw_dist
                     else:
                         # React faster to a wall that moves away.
-                        self.filtered_dist = (0.65 * self.filtered_dist
-                                              + 0.35 * raw_dist)
+                        self.filtered_dist = (0.35 * self.filtered_dist
+                                              + 0.65 * raw_dist)
                     dist = self.filtered_dist
                     error = dist - self.WALL_TARGET_DIST
-                    if abs(error) <= self.WALL_DEADBAND:
-                        error = 0.0
                     desired_angle = -self.DISTANCE_GAIN * error
                     desired_angle = max(-self.MAX_FOLLOW_TURN,
                                         min(self.MAX_FOLLOW_TURN, desired_angle))
@@ -288,6 +285,7 @@ class MyController:
                     self.last_report_counter = 0
         self.stop()
 
+
 def main():
     robot = None
     try:
@@ -309,5 +307,7 @@ def main():
         wait(20000)
         raise
 
+
 if __name__ == "__main__":
     main()
+    
