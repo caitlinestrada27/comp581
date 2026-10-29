@@ -18,17 +18,28 @@ class MyController:
         self.ultrasonic = UltrasonicSensor(Port.S4)  # Fixed facing LEFT
         self.gyro = GyroSensor(Port.S1) if USE_GYRO else None
         wait(1000)
-
+ 
         # Verify these two physical dimensions on the actual robot.
         self.WHEEL_RADIUS = 0.03175     # meters
         self.WHEEL_BASE = 0.127        # meters between wheel contact tracks
         self.APPROACH_SPEED = 200      # motor degrees / second
-        self.TURN_SPEED = 200
         self.FORWARD_SPEED = 100
-
+ 
+        # ---- Turning ----
+        # With the gyro, turns are closed-loop: rotate until the gyro reads
+        # 90 degrees (proportional slow-down, corrects overshoot, then holds).
+        self.TURN_SPEED = 250          # max motor deg/s during a turn
+        self.MIN_TURN_SPEED = 60       # min deg/s so the wheels never stall
+        self.TURN_KP = 6.0             # motor deg/s per degree of heading error
+        self.TURN_TOLERANCE = 1.0      # degrees
+        # Encoder-only fallback (no gyro). Wheels scrub on a sharp turn, so the
+        # robot under-rotates unless the wheel travel is scaled up. Raise this
+        # if it still turns less than 90 degrees, lower it if it overshoots.
+        self.TURN_SCALE = 1.15
         turn_arc = (math.pi / 2.0) * (self.WHEEL_BASE / 2.0)
-        self.TURN_DEG_90 = 1.05 * math.degrees(turn_arc / self.WHEEL_RADIUS)
-
+        self.TURN_DEG_90 = self.TURN_SCALE * math.degrees(
+            turn_arc / self.WHEEL_RADIUS)
+ 
         # Initial wall is measured by turning right, looking left, then
         # turning back. We drive by encoder distance since sensor faces left.
         # 0.20m gives clearance before the final right turn (< 0.30m).
@@ -39,7 +50,7 @@ class MyController:
         self.drive_target = 0.0
         self.drive_start_left = 0
         self.drive_start_right = 0
-
+ 
         # Left wall desired distance and gentle heading-feedback controller.
         self.WALL_TARGET_DIST = 0.105
         self.DISTANCE_GAIN = 100.0   # deg heading commanded per meter error
@@ -47,7 +58,7 @@ class MyController:
         self.MAX_FOLLOW_TURN = 15.0  # max commanded heading from wall direction
         self.MAX_STEERING = 20.0     # max difference from base wheel speed
         self.HEADING_SAFETY_LIMIT = 50.0  # stop instead of spiraling
-
+ 
         # Original stopping distance retained for your course setup.
         # Calibrate this against 2.2 m of actual distance along the wall.
         self.FOLLOW_TARGET = 2.75
@@ -56,19 +67,60 @@ class MyController:
         self.prev_right = 0
         self.heading_start_left = 0
         self.heading_start_right = 0
-
+ 
         self.state = "WAITING"
         self.settle_counter = 0
         self.last_screen_mode = None
         self.last_report_counter = 0
         self.filtered_dist = None
         self.bad_readings = 0
-
+ 
     def stop(self):
         self.left_motor.stop()
         self.right_motor.stop()
-
+ 
     def rotate(self, right):
+        """90-degree turn in place. Uses the gyro if available, else encoders."""
+        if self.gyro is not None:
+            self.rotate_gyro(right)
+        else:
+            self.rotate_encoder(right)
+ 
+    def rotate_gyro(self, right, degrees=90.0):
+        """Closed-loop turn: gyro angle is positive for a RIGHT turn."""
+        sign = 1 if right else -1
+        self.stop()
+        wait(200)                      # let the robot be still before zeroing
+        self.gyro.reset_angle(0)
+        wait(100)
+        timer = StopWatch()
+        in_tol = 0
+        while True:
+            turned = sign * self.gyro.angle()
+            error = degrees - turned   # >0 need more turn, <0 overshot
+            if abs(error) <= self.TURN_TOLERANCE:
+                in_tol += 1
+                if in_tol >= 5:        # stay in tolerance for ~50 ms
+                    break
+                self.left_motor.stop()
+                self.right_motor.stop()
+            else:
+                in_tol = 0
+                speed = self.TURN_KP * error
+                mag = max(self.MIN_TURN_SPEED, min(self.TURN_SPEED, abs(speed)))
+                speed = mag if speed > 0 else -mag
+                self.left_motor.run(sign * speed)
+                self.right_motor.run(-sign * speed)
+            if timer.time() > 8000:
+                self.stop()
+                raise RuntimeError("Turn timeout: check gyro/motor directions")
+            wait(10)
+        self.left_motor.hold()
+        self.right_motor.hold()
+        wait(300)
+        self.stop()
+ 
+    def rotate_encoder(self, right):
         """Approximate 90-degree turn in place using motor encoders."""
         start_left = self.left_motor.angle()
         start_right = self.right_motor.angle()
@@ -85,9 +137,11 @@ class MyController:
             self.left_motor.run(sign * self.TURN_SPEED)
             self.right_motor.run(-sign * self.TURN_SPEED)
             wait(10)
-        self.stop()
+        self.left_motor.hold()
+        self.right_motor.hold()
         wait(300)
-
+        self.stop()
+ 
     def read_dist(self):
         """Median of five ultrasonic measurements, meters."""
         vals = []
@@ -96,13 +150,13 @@ class MyController:
             wait(50)
         vals.sort()
         return vals[2] / 1000.0
-
+ 
     def reset_heading(self):
         if self.gyro is not None:
             self.gyro.reset_angle(0)
         self.heading_start_left = self.left_motor.angle()
         self.heading_start_right = self.right_motor.angle()
-
+ 
     def get_angle(self):
         """Positive heading means a RIGHT turn (verify gyro sign on robot)."""
         if self.gyro is not None:
@@ -112,7 +166,7 @@ class MyController:
         left_dist = math.radians(left_change) * self.WHEEL_RADIUS
         right_dist = math.radians(right_change) * self.WHEEL_RADIUS
         return math.degrees((left_dist - right_dist) / self.WHEEL_BASE)
-
+ 
     def show_once(self, label, dist):
         if self.last_screen_mode != label:
             self.ev3.screen.clear()
@@ -120,7 +174,7 @@ class MyController:
             self.ev3.screen.print("{:.3f} m".format(dist))
             print(label, "{:.3f} m".format(dist))
             self.last_screen_mode = label
-
+ 
     def halt(self, reason):
         self.stop()
         self.ev3.screen.clear()
@@ -128,11 +182,11 @@ class MyController:
         print("STOP:", reason)
         self.ev3.speaker.beep(frequency=440, duration=400)
         self.state = "DONE"
-
+ 
     def run(self):
         while self.state != "DONE":
             wait(20)
-
+ 
             if self.state == "WAITING":
                 self.stop()
                 self.ev3.screen.clear()
@@ -140,7 +194,7 @@ class MyController:
                 if Button.CENTER in self.ev3.buttons.pressed():
                     self.last_screen_mode = None
                     self.state = "SCAN"
-
+ 
             elif self.state == "SCAN":
                 # Turn right so left-facing sensor points at front wall.
                 self.rotate(True)
@@ -158,7 +212,7 @@ class MyController:
                 self.drive_start_right = self.right_motor.angle()
                 print("DRIVING {:.3f} m to 20cm standoff".format(self.drive_target))
                 self.state = "DRIVE"
-
+ 
             elif self.state == "DRIVE":
                 self.left_motor.run(self.APPROACH_SPEED + 1.5)
                 self.right_motor.run(self.APPROACH_SPEED)
@@ -169,7 +223,7 @@ class MyController:
                     self.stop()
                     print("ARRIVED after {:.3f} m: turning RIGHT".format(travelled))
                     self.state = "TURN"
-
+ 
             elif self.state == "TURN":
                 self.rotate(True)
                 measured = self.read_dist()
@@ -184,7 +238,7 @@ class MyController:
                 self.bad_readings = 0
                 self.settle_counter = 0
                 self.state = "SETTLE"
-
+ 
             elif self.state == "SETTLE":
                 self.left_motor.run(self.FORWARD_SPEED)
                 self.right_motor.run(self.FORWARD_SPEED)
@@ -197,7 +251,7 @@ class MyController:
                     self.ev3.screen.print("FOLLOWING")
                     print("STATE: FOLLOW")
                     self.state = "FOLLOW"
-
+ 
             elif self.state == "FOLLOW":
                 # Count linear wheel travel, not turn-in-place rotation.
                 left_now = self.left_motor.angle()
@@ -212,7 +266,7 @@ class MyController:
                 if self.follow_dist >= self.FOLLOW_TARGET:
                     self.halt("COMPLETE")
                     break
-
+ 
                 raw_dist = self.ultrasonic.distance() / 1000.0
                 # Reject missing/unplausible wall readings; don't endlessly
                 # turn left if the wall disappears from the sensor's view.
@@ -228,12 +282,12 @@ class MyController:
                 else:
                     self.filtered_dist = 0.7 * self.filtered_dist + 0.3 * raw_dist
                 dist = self.filtered_dist
-
+ 
                 angle = self.get_angle()
                 if abs(angle) >= self.HEADING_SAFETY_LIMIT:
                     self.halt("HEADING LIMIT")
                     continue
-
+ 
                 # Positive error = left wall too far away; turn LEFT
                 # (negative desired heading). Negative error = turn RIGHT.
                 error = dist - self.WALL_TARGET_DIST
@@ -246,7 +300,7 @@ class MyController:
                 # Positive steering turns RIGHT; negative turns LEFT.
                 self.left_motor.run(self.FORWARD_SPEED + steering)
                 self.right_motor.run(self.FORWARD_SPEED - steering)
-
+ 
                 if dist > 0.14:
                     label = "TOO_FAR"
                 elif dist < 0.07:
@@ -261,8 +315,8 @@ class MyController:
                               dist, angle, desired_angle, self.follow_dist))
                     self.last_report_counter = 0
         self.stop()
-
-
+ 
+ 
 def main():
     robot = None
     try:
@@ -280,7 +334,7 @@ def main():
         print("ERROR:", msg)
         wait(20000)
         raise
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
