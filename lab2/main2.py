@@ -53,6 +53,7 @@ class MyController:
         # not the older empirically tuned 2.75m wheel path.
         # Verify against markings on the floor; wheel slip creates errors.
         self.FOLLOW_TARGET = 2.20
+        self.DISTANCE_SCALE = 0.9545
         self.follow_dist = 0.0
         self.prev_left = 0
         self.prev_right = 0
@@ -226,6 +227,7 @@ class MyController:
                 # This excludes extra distance from steering/corrections.
                 forward_motion = (d_left + d_right) / 2.0
                 heading_rad = math.radians(self.get_angle())
+                self.follow_dist += (max(0.0, forward_motion * math.cos(heading_rad))* self.DISTANCE_SCALE)
                 self.follow_dist += max(0.0, forward_motion * math.cos(heading_rad))
                 if self.follow_dist >= self.FOLLOW_TARGET:
                     self.halt("COMPLETE")
