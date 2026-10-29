@@ -53,11 +53,18 @@ class MyController:
  
         # Left wall desired distance and gentle heading-feedback controller.
         self.WALL_TARGET_DIST = 0.105
-        self.DISTANCE_GAIN = 100.0   # deg heading commanded per meter error
+        self.DISTANCE_GAIN = 200.0   # deg heading commanded per meter error
         self.HEADING_GAIN = 3.0      # motor deg/s per deg heading error
-        self.MAX_FOLLOW_TURN = 15.0  # max commanded heading from wall direction
-        self.MAX_STEERING = 20.0     # max difference from base wheel speed
-        self.HEADING_SAFETY_LIMIT = 50.0  # stop instead of spiraling
+        self.MAX_FOLLOW_TURN = 35.0  # max commanded heading (wall curving away)
+        self.MAX_STEERING = 40.0     # max difference from base wheel speed
+        self.HEADING_SAFETY_LIMIT = 100.0  # stop instead of spiraling
+ 
+        # Wall-lost recovery: if the wall curves away out of sensor range,
+        # keep moving and arc LEFT to find it again instead of stopping.
+        self.MAX_VALID_DIST = 0.50   # readings beyond this = wall out of range
+        self.LOST_ARC = 35.0         # motor deg/s added/removed to arc left
+        self.LOST_TIMEOUT_MS = 4000  # give up searching after this long
+        self.lost_timer = None
  
         # Original stopping distance retained for your course setup.
         # Calibrate this against 2.2 m of actual distance along the wall.
@@ -236,6 +243,7 @@ class MyController:
                 self.follow_dist = 0.0
                 self.filtered_dist = None
                 self.bad_readings = 0
+                self.lost_timer = None
                 self.settle_counter = 0
                 self.state = "SETTLE"
  
@@ -270,12 +278,22 @@ class MyController:
                 raw_dist = self.ultrasonic.distance() / 1000.0
                 # Reject missing/unplausible wall readings; don't endlessly
                 # turn left if the wall disappears from the sensor's view.
-                if raw_dist <= 0.0 or raw_dist > 0.50:
-                    self.bad_readings += 1
-                    self.stop()
-                    if self.bad_readings >= 10:
+                if raw_dist <= 0.0 or raw_dist > self.MAX_VALID_DIST:
+                    # Wall curved away: keep moving and arc LEFT to find it.
+                    if self.lost_timer is None:
+                        self.lost_timer = StopWatch()
+                        self.filtered_dist = None
+                    if self.lost_timer.time() > self.LOST_TIMEOUT_MS:
                         self.halt("WALL LOST")
+                        continue
+                    if abs(self.get_angle()) >= self.HEADING_SAFETY_LIMIT:
+                        self.halt("HEADING LIMIT")
+                        continue
+                    self.left_motor.run(self.FORWARD_SPEED - self.LOST_ARC)
+                    self.right_motor.run(self.FORWARD_SPEED + self.LOST_ARC)
+                    self.show_once("SEARCH LEFT", raw_dist)
                     continue
+                self.lost_timer = None
                 self.bad_readings = 0
                 if self.filtered_dist is None:
                     self.filtered_dist = raw_dist
