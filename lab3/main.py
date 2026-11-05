@@ -25,7 +25,7 @@ class MyController:
        self.state = "WAITING"
 
 
-       self.WHEEL_RADIUS = 0.03175
+       self.WHEEL_RADIUS = 0.03175 # TODO: Consider adjusting the wheel radius
        self.WHEEL_BASE = 0.127
 
 
@@ -280,30 +280,14 @@ class MyController:
                  #self.show_once("REFERENCE", dist)
                  #print("--- REFERENCE DISTANCE SET: {:.3f} m ---".format(self.reference_dist))
                  wait(1500)
-
-
-
-
                  self.wall_mode = "STRAIGHT"
                  self.last_screen_mode = None
-
-
-
-
                  self.prev_left = self.left_motor.angle()
                  self.prev_right = self.right_motor.angle()
                  self.follow_dist = 0.0
                  wait(300)
-
-
-
-
                  self.gyro_sensor.reset_angle(0)
                  self.hit_theta = self.theta
-
-
-
-
                  self.state = "SETTLE"
                  self.settle_counter = 0
 
@@ -311,10 +295,6 @@ class MyController:
           elif self.state == "SETTLE":
              self.left_motor.run(self.FORWARD_SPEED)
              self.right_motor.run(self.FORWARD_SPEED)
-
-
-
-
              self.settle_counter += 1
              if self.settle_counter > 20:
                   self.state = "FOLLOW"
@@ -328,23 +308,14 @@ class MyController:
               dy = self.y - self.loop_origin_y
               dx = self.x - self.loop_origin_x
               dist_to_loop_origin = math.sqrt(dx * dx + dy * dy)
-
-
               #angle_in_window = (self.LOOP_ANGLE_MIN <= gyro_now <= self.LOOP_ANGLE_MAX)
               heading_error = self.theta - self.hit_theta
               while heading_error > math.pi:
                    heading_error -= 2 * math.pi
               while heading_error < -math.pi:
                    heading_error += 2 * math.pi
-
-
               dist = self.ultrasonic_sensor.distance() / 1000.0
-             
               error = self.reference_dist - dist
-
-
-
-
               if int(self.follow_dist * 10) % 5 == 0:
                    """dist_to_hit = self.distance_to_point(self.hit_x, self.hit_y)
                    self.ev3.screen.print("x={:.3f}, y={:.3f}, dist_to_hit={:.3f}, follow_dist={:.3f}".format(
@@ -356,21 +327,15 @@ class MyController:
                    """ self.ev3.screen.print("h_err={:.3f}".format(
                            heading_error
                        ))"""
-
-
               if abs(error) < 0.04:
                    #self.show_once("STRAIGHT", dist)
                    self.actuate_motors(self.FORWARD_SPEED)
               else:
                    #self.show_once("CORRECT", dist)
-
-
                    # too close
                    if error > 0:
                        turn = 1500 * error
                        turn = min(turn, 80)
-
-
                    else:
                        far_error = -error
                        if far_error < 0.02:
@@ -379,13 +344,8 @@ class MyController:
                            turn = -20 # from -28 to -30
                        else:
                            turn = -30 # from -30 to 35
-      
                    turn = max(min(turn, 80), -80)
-
-
                    print("DIST: {:.3f} m, REF: {:.3f} m, m ERROR: {:.3f}, TURN: {:.1f}".format(dist, self.reference_dist, error, turn))
-
-
                    self.left_motor.run(self.FORWARD_SPEED - turn)
                    self.right_motor.run(self.FORWARD_SPEED + turn)
               
@@ -394,7 +354,6 @@ class MyController:
                  self.stop()
                  self.reverse_counter = 0
                  self.state = "REVERSE"
-
 
               if self.hit_saved and not self.hit_reached_again and self.follow_dist > 4.0:
                dist_to_hit = self.distance_to_point(self.hit_x, self.hit_y)
@@ -482,15 +441,8 @@ class MyController:
                angle_error -= 2 * math.pi
            while angle_error < -math.pi:
                angle_error += 2 * math.pi
-
-
-
-
            correction = 80.0 * (angle_error / (math.pi / 2.0))
            correction = max(min(correction, 60), -60)
-
-
-          
            self.left_motor.run(self.FORWARD_SPEED - correction)
            self.right_motor.run(self.FORWARD_SPEED + correction + 1.25)
 
