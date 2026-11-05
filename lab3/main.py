@@ -33,7 +33,6 @@ class MyController:
        self.REVERSE_SPEED = 100
        self.TURN_SPEED = 200
        self.FORWARD_SPEED = 100
-      
 
 
        self.REVERSE_STEPS = 90 
@@ -415,8 +414,8 @@ class MyController:
 
 
               if turn_amount < self.TURN_DEG_90 * 1.25:
-                   self.left_motor.run(0)
-                   self.right_motor.run(self.TURN_SPEED)
+                self.left_motor.run(self.TURN_SPEED)
+                self.right_motor.run(-self.TURN_SPEED)
               else:
                    self.stop()
                    wait(500)
