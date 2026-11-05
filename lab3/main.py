@@ -256,41 +256,37 @@ class MyController:
                  self.follow_start_angle = 0.0
                  self.state = "TURN"
           elif self.state == "TURN":
-             self.turn_count += 1
-             left_change = abs(self.left_motor.angle() - self.turn_start_left)
-             right_change = abs(self.right_motor.angle() - self.turn_start_right)
-             turn_amount = (left_change + right_change) / 2.0
+            left_change = abs(self.left_motor.angle() - self.turn_start_left)
+            right_change = abs(self.right_motor.angle() - self.turn_start_right)
 
+            turn_amount = (left_change + right_change) / 2.0
 
-             if self.turn_count > 1:
-                 TURNING_ANGLE = self.TURN_SLIGHT
-             else:
-                    TURNING_ANGLE = self.TURN_DEG_90
-      
+            TURNING_ANGLE = self.TURN_DEG_90
 
+            if turn_amount < TURNING_ANGLE:
+                # Turn right
+                self.left_motor.run(self.TURN_SPEED)
+                self.right_motor.run(-self.TURN_SPEED)
 
-             if turn_amount < TURNING_ANGLE:
-                 self.left_motor.run(self.TURN_SPEED)
-                 self.right_motor.run(-self.TURN_SPEED)
-             else:
-                 self.stop()
-                 self.turn_count += 1
-                 self.reference_dist = dist
-                 self.last_screen_mode = None
-                 #self.show_once("REFERENCE", dist)
-                 #print("--- REFERENCE DISTANCE SET: {:.3f} m ---".format(self.reference_dist))
-                 wait(1500)
-                 self.wall_mode = "STRAIGHT"
-                 self.last_screen_mode = None
-                 self.prev_left = self.left_motor.angle()
-                 self.prev_right = self.right_motor.angle()
-                 self.follow_dist = 0.0
-                 wait(300)
-                 self.gyro_sensor.reset_angle(0)
-                 self.hit_theta = self.theta
-                 self.state = "SETTLE"
-                 self.settle_counter = 0
+            else:
+                self.stop()
+                self.turn_count += 1
 
+                self.reference_dist = dist
+                self.last_screen_mode = None
+
+                wait(1500)
+
+                self.wall_mode = "STRAIGHT"
+                self.prev_left = self.left_motor.angle()
+                self.prev_right = self.right_motor.angle()
+                self.follow_dist = 0.0
+
+                wait(300)
+
+                self.hit_theta = self.theta
+                self.state = "SETTLE"
+                self.settle_counter = 0
 
           elif self.state == "SETTLE":
              self.left_motor.run(self.FORWARD_SPEED)
