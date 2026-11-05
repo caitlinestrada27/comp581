@@ -16,9 +16,9 @@ class MyController:
        self.left_motor = Motor(Port.C)
        self.right_motor = Motor(Port.D)
        self.touch_sensor1 = TouchSensor(Port.S3)
-       self.touch_sensor2 = TouchSensor(Port.S2)
-       self.ultrasonic_sensor = UltrasonicSensor(Port.S1)
-       self.gyro_sensor = GyroSensor(Port.S4)
+       # self.touch_sensor2 = TouchSensor(Port.S2)
+       self.ultrasonic_sensor = UltrasonicSensor(Port.S4)
+       self.gyro_sensor = GyroSensor(Port.S1)
        wait(1000)
 
 
@@ -217,7 +217,8 @@ class MyController:
              self.actuate_motors(self.APPROACH_SPEED)
 
 
-             if self.touch_sensor1.pressed() or self.touch_sensor2.pressed():
+             if self.touch_sensor1.pressed():
+                #   or self.touch_sensor2.pressed()
                  self.stop()
                  if not self.hit_saved:
                    self.ev3.speaker.beep()
@@ -388,7 +389,8 @@ class MyController:
                    self.left_motor.run(self.FORWARD_SPEED - turn)
                    self.right_motor.run(self.FORWARD_SPEED + turn)
               
-              if self.touch_sensor1.pressed() or self.touch_sensor2.pressed():
+              if self.touch_sensor1.pressed():
+                #   or self.touch_sensor2.pressed()
                  self.stop()
                  self.reverse_counter = 0
                  self.state = "REVERSE"
