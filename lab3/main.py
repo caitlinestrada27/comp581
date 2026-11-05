@@ -325,7 +325,29 @@ class MyController:
                        ))"""
               if abs(error) < 0.04:
                    #self.show_once("STRAIGHT", dist)
-                   self.actuate_motors(self.FORWARD_SPEED)
+                    # Target distance from the wall
+                    target_dist = 0.18
+
+                    # Positive error means too close to wall
+                    error = target_dist - dist
+
+                    # Gentle proportional steering correction
+                    Kp = 350
+
+                    turn = Kp * error
+
+                    # Limit how aggressively the robot can turn
+                    turn = max(min(turn, 25), -25)
+
+                    # Wall is on LEFT side
+                    # Too close -> turn RIGHT
+                    # Too far -> turn LEFT
+                    left_speed = self.FORWARD_SPEED + turn
+                    right_speed = self.FORWARD_SPEED - turn
+
+                    self.left_motor.run(left_speed)
+                    self.right_motor.run(right_speed)
+
               else:
                    #self.show_once("CORRECT", dist)
                    # too close
