@@ -274,6 +274,7 @@ class MyController:
                  self.right_motor.run(self.TURN_SPEED)
              else:
                  self.stop()
+                 self.turn_count += 1
                  self.reference_dist = dist
                  self.last_screen_mode = None
                  #self.show_once("REFERENCE", dist)
