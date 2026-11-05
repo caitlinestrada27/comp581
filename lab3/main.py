@@ -270,8 +270,8 @@ class MyController:
 
 
              if turn_amount < TURNING_ANGLE:
-                 self.left_motor.run(-self.TURN_SPEED)
-                 self.right_motor.run(self.TURN_SPEED)
+                 self.left_motor.run(self.TURN_SPEED)
+                 self.right_motor.run(-self.TURN_SPEED)
              else:
                  self.stop()
                  self.turn_count += 1
