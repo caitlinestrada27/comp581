@@ -25,6 +25,18 @@ HIT_EXIT_RADIUS_M = 0.42  # Must first have LEFT this larger circle
 MIN_LOOP_DIST_M = 1.40    # Must also have traveled at least this much
 REQUIRE_HEADING_MATCH = True
 HIT_HEADING_TOL_DEG = 50  # Compare with heading at beginning of first FOLLOW
+
+# When the perimeter is complete, do NOT rotate in place beside the wall.
+# Arc forward and RIGHT (away from the wall on the robot's left) first.
+# This is a conservative starting calibration, not a collision guarantee.
+EXIT_ARC_TRAVEL_M = 0.30    # minimum forward arc travel before considering a turn
+EXIT_MAX_TRAVEL_M = 0.55    # abort rather than driving indefinitely
+EXIT_CLEARANCE_M = 0.30     # side ultrasonic reading required before pivot
+EXIT_CLEAR_READINGS = 3     # consecutive filtered readings above threshold
+EXIT_MIN_TURN_DEG = 25.0    # ensure the arc actually steered away
+EXIT_SPEED = 95.0           # wheel motor deg/s
+EXIT_STEER = 22.0           # positive curves RIGHT; gentle exit arc
+EXIT_TIMEOUT_MS = 15000
 # =======================================================================
 
 
@@ -123,6 +135,12 @@ class MyController:
         self.first_follow_heading = None
         self.follow_dist = 0.0
 
+        # State for peeling away from the wall before turning home.
+        self.exit_travel = 0.0
+        self.exit_start_heading = 0.0
+        self.exit_clear_readings = 0
+        self.exit_start_ms = 0
+
         self.bump_x = 0.0
         self.bump_y = 0.0
         self.turn_target = 0.0
@@ -207,6 +225,16 @@ class MyController:
         desired_cw = -math.degrees(bearing_ccw)
         shortest_turn = wrap_degrees(desired_cw - self.heading())
         self.begin_turn(shortest_turn, "RETURN")
+
+    def begin_exit_wall(self):
+        """Move away from the left-hand wall before any in-place turn."""
+        self.stop()
+        self.exit_travel = 0.0
+        self.exit_start_heading = self.heading()
+        self.exit_clear_readings = 0
+        self.exit_start_ms = self.clock.time()
+        self.state = "EXIT_WALL"
+        self.say("EXIT WALL")
 
     def reset_follow_segment(self):
         self.wall_f = min(self.ultrasonic.distance() / 1000.0, self.MAX_US)
@@ -364,6 +392,8 @@ class MyController:
                     self.left_hit_region = False
                     self.first_follow_heading = None
                     self.debug_counter = 0
+                    self.exit_travel = 0.0
+                    self.exit_clear_readings = 0
                     self.clock.reset()
                     self.state = "DRIVE"
                 continue
@@ -401,6 +431,12 @@ class MyController:
                     self.begin_turn(90.0, "FOLLOW")
 
             elif self.state == "TURN":
+                # Stop rather than forcing a return turn into an obstacle.
+                if self.after_turn == "RETURN" and self.touch_sensor.pressed():
+                    self.stop()
+                    self.say("TURN BLOCKED")
+                    self.state = "DONE"
+                    continue
                 remaining = self.turn_target - self.heading()
                 if abs(remaining) > 2.0:
                     if self.clock.time() - self.turn_started > self.TURN_TIMEOUT_MS:
@@ -447,9 +483,60 @@ class MyController:
                     self.ev3.speaker.beep()
                     self.say("BACK AT HIT")
                     wait(300)
+                    # The robot is still close to the wall. A pivot here
+                    # sweeps the chassis into it, so leave the wall first.
+                    self.begin_exit_wall()
+
+            elif self.state == "EXIT_WALL":
+                # Physical side clearance must be established before rotating.
+                # The ultrasonic sensor faces LEFT, so drive a gentle RIGHT arc.
+                if self.touch_sensor.pressed():
+                    self.stop()
+                    self.say("EXIT BLOCKED")
+                    self.state = "DONE"
+                    continue
+
+                if self.clock.time() - self.exit_start_ms > EXIT_TIMEOUT_MS:
+                    self.stop()
+                    self.say("EXIT TIMEOUT")
+                    self.state = "DONE"
+                    continue
+
+                self.exit_travel += max(0.0, self.d_center)
+                turned_right = wrap_degrees(
+                    self.heading() - self.exit_start_heading)
+
+                if wall >= EXIT_CLEARANCE_M:
+                    self.exit_clear_readings += 1
+                else:
+                    self.exit_clear_readings = 0
+
+                enough_space = (self.exit_clear_readings >=
+                                EXIT_CLEAR_READINGS)
+                enough_motion = (self.exit_travel >= EXIT_ARC_TRAVEL_M
+                                 and turned_right >= EXIT_MIN_TURN_DEG)
+
+                if enough_motion and enough_space:
+                    self.stop()
+                    self.say("CLEAR TO TURN")
                     self.face_start()
+                elif self.exit_travel >= EXIT_MAX_TRAVEL_M:
+                    # Without adequate clearance, a blind in-place turn
+                    # is less safe than stopping and reporting the problem.
+                    self.stop()
+                    self.say("NO CLEARANCE")
+                    self.state = "DONE"
+                else:
+                    self.steer(EXIT_SPEED, EXIT_STEER)
 
             elif self.state == "RETURN":
+                # With only a side sonar and a front bump switch, there is no
+                # guarantee that the direct line home is obstacle-free.
+                if self.touch_sensor.pressed():
+                    self.stop()
+                    self.say("RETURN BLOCKED")
+                    self.state = "DONE"
+                    continue
                 dx = self.start_x - self.x
                 dy = self.start_y - self.y
                 distance = math.sqrt(dx * dx + dy * dy)
