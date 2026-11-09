@@ -18,15 +18,15 @@ DEBUG = True      # Print position/distance information periodically
 # then alternate a small LEFT turn and a short straight probe.
 # Stop and confirm several fresh ultrasonic readings before following
 # the next wall. A RIGHT turn is used to move away from a left wall.
-CORNER_INITIAL_ADVANCE_M = 0.030   # 3 cm past a lost-wall edge
-CORNER_STEP_DEG = 10.0             # small left pivots
-CORNER_PROBE_M = 0.040             # 4 cm forward after each pivot
-CORNER_REACQUIRE_M = 0.23          # wall must be within 23 cm
+CORNER_INITIAL_ADVANCE_M = 0.015   # 3 cm past a lost-wall edge
+CORNER_STEP_DEG = 12.0             # small left pivots
+CORNER_PROBE_M = 0.1             # 10 cm forward after each pivot
+CORNER_REACQUIRE_M = 0.30         # wall must be within 30 cm
 CORNER_REACQUIRE_SAMPLES = 3       # fresh readings while STOPPED
 CORNER_SAMPLE_INTERVAL_MS = 100
 CORNER_STABILITY_TOL_M = 0.06      # readings within 6 cm of each other
 CORNER_TOO_CLOSE_M = 0.065        # use a cautious wall recovery if very close
-CORNER_MAX_TOTAL_TURN_DEG = 120.0
+CORNER_MAX_TOTAL_TURN_DEG = 200
 CORNER_SEARCH_TIMEOUT_MS = 15000
 CORNER_TURN_SPEED = 145.0
 
@@ -90,10 +90,10 @@ class MyController:
         self.WHEEL_RADIUS = 0.03175  # meters
         self.WHEEL_BASE = 0.127     # distance between wheel tracks, meters
 
-        self.APPROACH_SPEED = 200   # wheel degrees/second
-        self.REVERSE_SPEED = 120
+        self.APPROACH_SPEED = 220   # wheel degrees/second
+        self.REVERSE_SPEED = 150
         self.TURN_SPEED = 200
-        self.FOLLOW_SPEED = 140
+        self.FOLLOW_SPEED = 160
         self.CORNER_SPEED = 120
         self.RETURN_SPEED = 180
         self.BACKUP_DIST = 0.10
@@ -402,25 +402,40 @@ class MyController:
             # Move only a short distance, then STOP to confirm the wall.
             # This prevents a fleeting echo from sending us into a sharp HUG
             # correction at the first (or any other) outside corner.
-            else:  # corner_mode == "PROBE"
+            else:  # corner_mode == "PROBE" 
                 self.corner_stage_distance += max(0.0, self.d_center)
+
+                # Very close to the wall: stop and begin recovery.
                 if wall <= self.CORNER_TOO_CLOSE:
-                    # Do not continue probing straight when the wall is very
-                    # close. Leave the controller a chance to steer away.
                     self.stop()
                     self.wall_f = wall
                     self.start_hug()
-                elif self.corner_stage_distance >= self.CORNER_PROBE:
+
+                # A possible wall has appeared.
+                # Stop and confirm it before moving farther.
+                elif wall <= self.CORNER_REACQUIRE:
                     self.stop()
+
                     if self.confirm_new_wall():
-                        print("CORNER: verified wall at {:.3f} m".format(
-                            self.wall_f))
+                        print("WALL CONFIRMED:", self.wall_f)
                         self.start_hug()
-                    else:
+
+                    elif self.corner_stage_distance >= self.CORNER_PROBE:
                         self.corner_mode = "TURN"
                         self.corner_step_start_heading = self.heading()
+
+                    else:
+                        self.steer(self.CORNER_SPEED, 0.0)
+
+                # Completed the probe without finding a wall.
+                elif self.corner_stage_distance >= self.CORNER_PROBE:
+                    self.stop()
+                    self.corner_mode = "TURN"
+                    self.corner_step_start_heading = self.heading()
+
                 else:
                     self.steer(self.CORNER_SPEED, 0.0)
+
 
         # Phase 3: temporarily hug the new wall before regular tracking.
         elif self.lost_phase == 3:
