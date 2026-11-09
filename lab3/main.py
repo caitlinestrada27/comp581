@@ -1,487 +1,431 @@
 #!/usr/bin/env pybricks-micropython
-
+# COMP 581 Lab 3 - Team #__
+# Names / PIDs: ______________________
 
 from pybricks.hubs import EV3Brick
-from pybricks.ev3devices import (Motor, TouchSensor, UltrasonicSensor, GyroSensor)
-from pybricks.parameters import Port, Stop, Direction, Button, Color
+from pybricks.ev3devices import Motor, TouchSensor, UltrasonicSensor, GyroSensor
+from pybricks.parameters import Port, Button
 from pybricks.tools import wait, StopWatch
-from pybricks.media.ev3dev import SoundFile, ImageFile
 import math
+
+# ----------------------------------------------------------------------
+# ASSUMPTIONS:
+#   * Ultrasonic sensor faces LEFT (wall is on the left after the right turn).
+#   * Positive steer = curve RIGHT (left wheel faster).
+#   * Robot frame: start = (0,0), initial heading = +x. theta is CCW-positive
+#     (the EV3 gyro is CW-positive, so theta = -gyro).
+#
+# CORNER HANDLING (outside/convex corner, wall lost) - works for any angle:
+#   arc left FAST until the sensor sees a wall again (or MAX_ARC degrees),
+#   hug it with a strong raw-distance controller for HUG_DIST meters,
+#   then resume normal gyro-corrected wall following.
+# ----------------------------------------------------------------------
+
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def wrap_pi(a):
+    while a > math.pi:
+        a -= 2 * math.pi
+    while a < -math.pi:
+        a += 2 * math.pi
+    return a
 
 
 class MyController:
-   def __init__(self):
-       # Initialize robot, sensors, and motors
-       self.ev3 = EV3Brick()
-       self.left_motor = Motor(Port.C)
-       self.right_motor = Motor(Port.D)
-       self.touch_sensor1 = TouchSensor(Port.S3)
-       # self.touch_sensor2 = TouchSensor(Port.S2)
-       self.ultrasonic_sensor = UltrasonicSensor(Port.S4)
-       self.gyro_sensor = GyroSensor(Port.S1)
-       wait(1000)
-
-
-       self.state = "WAITING"
-
-
-       self.WHEEL_RADIUS = 0.03175 # TODO: Consider adjusting the wheel radius
-       self.WHEEL_BASE = 0.127
-
-
-       self.APPROACH_SPEED = 200
-       self.REVERSE_SPEED = 100
-       self.TURN_SPEED = 200
-       self.FORWARD_SPEED = 100
-
-
-       self.REVERSE_STEPS = 90 
-
-
-       turn_arc = (math.pi / 2.0) * (self.WHEEL_BASE / 2.0)
-       self.TURN_DEG_90 = math.degrees(turn_arc / self.WHEEL_RADIUS)
-       self.TURN_SLIGHT = self.TURN_DEG_90 * 0.70
-
-
-       self.turn_start_left = 0
-       self.turn_start_right = 0
-       self.reverse_counter = 0
-       self.follow_dist = 0.0
-       self.prev_left = self.left_motor.angle()
-       self.prev_right = self.right_motor.angle()
-
-
-       self.x = 0.0
-       self.y = 0.0
-       self.theta = 0.0
-       self.hit_theta = 0.0
-
-
-       self.loop_origin_x = 0.0
-       self.loop_origin_y = 0.0
-       self.loop_origin_theta = 0.0
-
-
-       self.start_x = 0.0
-       self.start_y = 0.0
-
-
-       self.hit_x = 0.0
-       self.hit_y = 0.0
-
-
-       self.LOOP_ANGLE_MIN = -25
-       self.LOOP_ANGLE_MAX = 20
-       self.HIT_RETURN_RADIUS = 0.20
-       self.OBSTACLE_DETECT_DIST = 0.30
-       self.turn_count = 0
-
-
-       self.start_saved = False
-       self.hit_saved = False
-
-
-       self.hit_reached_again = False
-       self.start_reached_again = False
-
-
-       self.clearance_start_left = 0
-       self.clearance_start_right = 0
-       self.CLEARANCE_DEG = 120   # tune this
-
-
-       self.reference_dist = 0.0
-       self.last_screen_mode = None
-       self.wall_mode = "STRAIGHT"
-     
-   def actuate_motors(self, speed):
-       # Helper function for running motors at a given speed
-       self.left_motor.run(speed)
-       self.right_motor.run(speed+ 1.5)
-
-
-   def stop(self):
-       # Helper function for stopping motors
-       self.left_motor.stop()
-       self.right_motor.stop()
-
-
-   def show_once(self, label, dist):
-     if self.last_screen_mode != label:
-         self.ev3.screen.clear()
-         self.ev3.screen.print(label)
-         self.ev3.screen.print("{:.3f} m".format(dist))
-         print(label, "{:.3f} m".format(dist))
-         self.last_screen_mode = label
-
-
-   def compute_position(self, left_angle, right_angle):
-       # Implement diffential drive kinematics to update the robot's position and orientation
-       # Hint: Use the formula from the slides
-       cur_left = self.left_motor.angle()
-       cur_right = self.right_motor.angle()
-
-
-       delta_left = left_angle - self.prev_left
-       delta_right = right_angle - self.prev_right
-
-
-       self.prev_left = left_angle
-       self.prev_right = right_angle
-
-
-       d_left = math.radians(delta_left) * self.WHEEL_RADIUS
-       d_right = math.radians(delta_right) * self.WHEEL_RADIUS
-
-
-       d_center = (d_left + d_right) / 2.0
-       delta_theta = (d_right - d_left) / self.WHEEL_BASE
-
-
-       self.theta = math.radians(self.gyro_sensor.angle())
-       self.x += d_center * math.cos(self.theta)
-       self.y += d_center * math.sin(self.theta)
-
-
-       self.follow_dist += abs(d_center)
-  
-   def print_current_location(self, label):
-       dx = self.x - self.loop_origin_x
-       dy = self.y - self.loop_origin_y
-       dist_to_loop_origin = math.sqrt(dx * dx + dy * dy)
-
-
-       self.debug_blue(
-           "{} | x={:.3f}, y={:.3f}, theta_deg={:.1f}, gyro_deg={:.1f}, dist_to_loop_origin={:.3f}".format(
-               label,
-               self.x,
-               self.y,
-               math.degrees(self.theta),
-               self.gyro.angle(),
-               dist_to_loop_origin
-           )
-       )
-
-
-   def distance_to_point(self, px, py):
-       return math.sqrt((self.x - px)**2 + (self.y - py)**2)
-
-
-   def is_near_point(self, px, py, tolerance=0.05):
-       return self.distance_to_point(px, py) <= tolerance
-
-
-   def run(self):
-  
-        while True:
-  
-          wait(20)
-         
-          dist = self.ultrasonic_sensor.distance() / 1000.0
-          if self.state == "WAITING":
-             self.stop()
-             self.ev3.screen.clear()
-             self.ev3.screen.print("Press CENTER")
-
-
-
-
-             if Button.CENTER in self.ev3.buttons.pressed():
-                 self.x = 0.0
-                 self.y = 0.0
-                 self.theta = 0.0
-                 self.follow_dist = 0.0
-                 self.gyro_sensor.reset_angle(0)
-
-
-                 self.prev_left = self.left_motor.angle()
-                 self.prev_right = self.right_motor.angle()
-
-
-                 self.start_x = self.x
-                 self.start_y = self.y
-                 self.start_saved = True
-                 self.hit_saved = False
-                 self.hit_reached_again = False
-                 self.start_reached_again = False
-
-
-                 self.reverse_counter = 0
-                 self.wall_mode = "STRAIGHT"
-                 self.last_screen_mode = None
-                 self.state = "DRIVE"
-                
-          elif self.state == "DRIVE":
-             self.compute_position(self.left_motor.angle(), self.right_motor.angle())
-             self.actuate_motors(self.APPROACH_SPEED)
-
-
-             if self.touch_sensor1.pressed():
-                #   or self.touch_sensor2.pressed()
-                 self.stop()
-                 if not self.hit_saved:
-                   self.ev3.speaker.beep()
-                   self.hit_x = self.x
-                   self.hit_y = self.y
-                   self.ev3.screen.print("HIT: x={:.3f}, y={:.3f}".format(self.hit_x, self.hit_y))
-              
-                   self.hit_saved = True
-                 self.reverse_counter = 0
-                 self.state = "REVERSE"
-
-
-
-
-          elif self.state == "REVERSE":
-             self.compute_position(self.left_motor.angle(), self.right_motor.angle())
-             self.actuate_motors(-self.REVERSE_SPEED)
-             self.reverse_counter += 1
-# 0.618, 0
-             if self.reverse_counter >= self.REVERSE_STEPS:
-                 self.stop()
-
-
-                 """if not self.hit_saved:
-                   self.ev3.speaker.beep()
-                   self.hit_x = self.x
-                   self.hit_y = self.y
-                   self.hit_theta = self.theta
-                   self.hit_saved = True"""
-  
-                
-                 self.turn_start_left = self.left_motor.angle()
-                 self.turn_start_right = self.right_motor.angle()
-                 # Reset once right before the turn starts.
-                 self.gyro_sensor.reset_angle(0)
-                 self.follow_start_angle = 0.0
-                 self.state = "TURN"
-          elif self.state == "TURN":
-            left_change = abs(self.left_motor.angle() - self.turn_start_left)
-            right_change = abs(self.right_motor.angle() - self.turn_start_right)
-
-            turn_amount = (left_change + right_change) / 2.0
-
-            TURNING_ANGLE = self.TURN_DEG_90
-
-            if turn_amount < TURNING_ANGLE:
-                # Turn right
-                self.left_motor.run(self.TURN_SPEED)
-                self.right_motor.run(-self.TURN_SPEED)
-
+    def __init__(self):
+        self.ev3 = EV3Brick()
+        self.left_motor = Motor(Port.C)
+        self.right_motor = Motor(Port.D)
+        self.touch_sensor1 = TouchSensor(Port.S3)
+        self.ultrasonic_sensor = UltrasonicSensor(Port.S4)
+        self.gyro_sensor = GyroSensor(Port.S1)
+        self.watch = StopWatch()
+        wait(1000)  # let the gyro settle; do not move the robot
+
+        # Geometry (meters)
+        self.WHEEL_RADIUS = 0.03175
+        self.WHEEL_BASE = 0.127
+        # Distance from robot center to the measuring point (front of robot).
+        self.MEASURE_OFFSET = 0.0
+
+        # Speeds (deg/s of the wheel motors)
+        self.APPROACH_SPEED = 200
+        self.REVERSE_SPEED = 120
+        self.TURN_SPEED = 200
+        self.FOLLOW_SPEED = 140
+        self.RETURN_SPEED = 180
+
+        # Wall following (P control)
+        self.TARGET_DIST = 0.15     # want ~15 cm from wall (limit is 30 cm)
+        self.KP_WALL = 250.0        # deg/s of steer per meter of error
+        self.MAX_STEER = 45
+        self.LOST_DIST = 0.32       # wall considered lost beyond this
+        self.MAX_US = 0.60          # clamp ultrasonic readings
+
+        # Corner handling (tune these!)
+        self.LOST_CONFIRM = 0.02    # meters of travel with no wall before a corner is declared
+        self.CORNER_SPEED = 120     # avg wheel speed during the arc
+        self.ARC_STEER = 75         # arc sharpness: left wheel 45, right 195 (radius ~10 cm, ~37 deg/s)
+        self.ARC_EASE_DEG = 45      # after this many degrees of arc, halve the steering
+        self.SEE_DIST = 0.28        # arc ends when the sensor reads closer than this...
+        self.SEE_LOOPS = 4          # ...for this many loops in a row...
+        self.MIN_ARC = 8            # ...after turning at least this many degrees
+        self.MAX_ARC = 100          # give up arcing after this many degrees
+        self.MIN_TRACK = 0.15       # must follow a wall this far (m) before a loss counts as a corner
+        self.track_dist = 0.0
+        self.KP_HUG = 400.0         # stronger P control while re-hugging after a corner
+        self.MAX_STEER_HUG = 90
+        self.HUG_DIST = 0.20        # meters of "hug" driving before normal following resumes
+        self.has_wall = False       # seen the wall since the last turn?
+        # 0 = following, 2 = arcing left, 3 = hugging after corner, 4 = searching straight
+        self.lost_phase = 0
+        self.lost_count = 0
+        self.see_count = 0
+        self.hug_travel = 0.0
+        self.lost_gyro = 0.0
+
+        # Bump recovery
+        self.BACKUP_DIST = 0.10
+
+        # Loop closure
+        self.MIN_LOOP_DIST = 1.2    # must follow at least this far (min perimeter 1.5 m)
+        self.HIT_RADIUS = 0.30      # "near the hit point"
+
+        # Heading hold while driving straight
+        self.KP_HEADING = 3.0
+
+        # Hardware drift trim (deg/s added to right wheel). Original code used 1.5.
+        # If the robot drifts LEFT when driving straight, raise it; RIGHT, lower it.
+        self.TRIM = 1.5
+
+        self.dbg = 0
+        self.KP_YAW = 2.0          # deg/s of steer per degree of yaw toward the wall
+        self.wall_ref = 0.0        # gyro heading parallel to the wall
+        self.TIME_LIMIT_MS = 118000
+
+        # State
+        self.state = "WAITING"
+        self.x = 0.0
+        self.y = 0.0
+        self.theta = 0.0
+        self.d_center = 0.0
+        self.prev_left = self.left_motor.angle()
+        self.prev_right = self.right_motor.angle()
+
+        self.start_x = self.MEASURE_OFFSET
+        self.start_y = 0.0
+        self.hit_x = 0.0
+        self.hit_y = 0.0
+        self.hit_saved = False
+        self.bump_x = 0.0
+        self.bump_y = 0.0
+
+        self.follow_dist = 0.0
+        self.turn_target = 0.0
+        self.after_turn = "FOLLOW"
+        self.wall_f = 0.3  # filtered wall distance
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def stop(self):
+        self.left_motor.stop()
+        self.right_motor.stop()
+
+    def steer(self, speed, turn):
+        # positive turn = curve right
+        self.left_motor.run(speed + turn)
+        self.right_motor.run(speed - turn + self.TRIM)
+
+    def say(self, msg):
+        self.ev3.screen.clear()
+        self.ev3.screen.print(msg)
+        print(msg)
+
+    def update_odometry(self):
+        l = self.left_motor.angle()
+        r = self.right_motor.angle()
+        d_left = math.radians(l - self.prev_left) * self.WHEEL_RADIUS
+        d_right = math.radians(r - self.prev_right) * self.WHEEL_RADIUS
+        self.prev_left = l
+        self.prev_right = r
+
+        self.d_center = (d_left + d_right) / 2.0
+        # Gyro is clockwise-positive, math is CCW-positive -> negate.
+        self.theta = -math.radians(self.gyro_sensor.angle())
+        self.x += self.d_center * math.cos(self.theta)
+        self.y += self.d_center * math.sin(self.theta)
+
+    def read_wall(self):
+        raw = self.ultrasonic_sensor.distance() / 1000.0
+        raw = min(raw, self.MAX_US)
+        self.wall_f = 0.5 * self.wall_f + 0.5 * raw
+        return self.wall_f
+
+    def dist_to(self, px, py):
+        return math.sqrt((self.x - px) ** 2 + (self.y - py) ** 2)
+
+    def begin_turn_right(self, degrees, next_state):
+        self.turn_target = self.gyro_sensor.angle() + degrees
+        self.after_turn = next_state
+        self.state = "TURN"
+
+    def wall_follow(self, wall):
+        # Wall is on the left.
+        g = self.gyro_sensor.angle()
+        # How far we are yawed LEFT (toward the wall) relative to the wall's
+        # direction. Gyro is CW-positive, so yawing left makes g smaller.
+        yaw_left = clamp(math.radians(self.wall_ref - g), -0.7, 0.7)
+
+        # A sideways sensor reads along the beam: when yawed, the reading is
+        # longer than the true perpendicular distance. Correct it.
+        perp = wall * math.cos(yaw_left)
+
+        # Too close -> error>0 -> steer right (away from wall).
+        error = self.TARGET_DIST - perp
+        turn = self.KP_WALL * error + self.KP_YAW * math.degrees(yaw_left)
+        turn = clamp(turn, -self.MAX_STEER, self.MAX_STEER)
+        self.steer(self.FOLLOW_SPEED, turn)
+
+        # When we're sitting at the right distance we must be roughly parallel
+        # to the wall, so slowly learn the wall direction (handles curved walls).
+        if abs(error) < 0.03:
+            self.wall_ref += 0.03 * (g - self.wall_ref)
+
+    def start_arc(self, g):
+        self.say("ARC w={:.2f}".format(self.wall_f))
+        self.lost_phase = 2
+        self.lost_count = 0
+        self.see_count = 0
+        self.lost_gyro = g
+
+    def start_hug(self):
+        self.say("HUG w={:.2f}".format(self.wall_f))
+        self.lost_phase = 3
+        self.hug_travel = 0.0
+        self.lost_count = 0
+        self.see_count = 0
+
+    def follow_step(self, wall):
+        """One control step of wall following, including corner handling.
+
+        Corner handling is sensor-driven (works for any corner angle):
+          arc left FAST until the sensor sees a wall again, then hug it with a
+          strong raw-distance controller for a short distance, then resume
+          normal gyro-corrected following.
+        """
+        g = self.gyro_sensor.angle()
+
+        # ---- phase 0: normal following ----
+        if self.lost_phase == 0:
+            if wall <= self.LOST_DIST:
+                self.track_dist += abs(self.d_center)
+                if self.track_dist >= self.MIN_TRACK:
+                    self.has_wall = True
+                self.lost_count = 0
+                self.wall_follow(wall)
+            elif not self.has_wall:
+                # Haven't seen the wall since the turn: straight.
+                self.steer(self.FOLLOW_SPEED * 0.7, 0)
             else:
+                # lost_count = meters traveled with no wall (not loops): the
+                # sensor refreshes slower than our loop.
+                self.lost_count += abs(self.d_center)
+                if self.lost_count < self.LOST_CONFIRM:
+                    self.steer(self.FOLLOW_SPEED, 0)  # brief dropout
+                else:
+                    self.start_arc(g)
+
+        # ---- phase 2: fast left arc until the sensor sees a wall ----
+        elif self.lost_phase == 2:
+            turned_left = self.lost_gyro - g  # left = gyro decreases
+            if wall < self.SEE_DIST and turned_left >= self.MIN_ARC:
+                self.see_count += 1
+            else:
+                self.see_count = 0
+            if self.see_count >= self.SEE_LOOPS:
+                self.start_hug()
+            elif turned_left >= self.MAX_ARC:
+                self.say("SEARCH w={:.2f}".format(self.wall_f))
+                self.lost_phase = 4  # nothing found: go straight and search
+            else:
+                # Ease off partway through so we don't overshoot the new wall.
+                steer_now = self.ARC_STEER
+                if turned_left >= self.ARC_EASE_DEG:
+                    steer_now = self.ARC_STEER * 0.5
+                self.steer(self.CORNER_SPEED, -steer_now)
+
+        # ---- phase 3: hug the corner / new wall with raw distance control ----
+        elif self.lost_phase == 3:
+            # Raw reading only (no yaw correction): holding a constant raw
+            # distance curls the robot around a corner point. Keep wall_ref
+            # tracking the heading so normal following starts from here.
+            self.wall_ref = g
+            self.hug_travel += abs(self.d_center)
+            if wall > self.LOST_DIST:
+                self.lost_count += abs(self.d_center)
+                if self.lost_count >= self.LOST_CONFIRM:
+                    self.start_arc(g)  # another corner right away
+                else:
+                    self.steer(self.CORNER_SPEED, 0)
+            else:
+                self.lost_count = 0
+                error = self.TARGET_DIST - wall
+                turn = clamp(self.KP_HUG * error, -self.MAX_STEER_HUG, self.MAX_STEER_HUG)
+                self.steer(self.CORNER_SPEED, turn)
+                if self.hug_travel >= self.HUG_DIST:
+                    self.lost_phase = 0
+                    self.lost_count = 0
+
+        # ---- phase 4: arc found nothing; straight until a wall appears ----
+        else:
+            if wall <= self.LOST_DIST:
+                self.start_hug()
+            else:
+                self.steer(self.CORNER_SPEED, -8)
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+    def run(self):
+        while True:
+            wait(20)
+
+            if self.state == "WAITING":
                 self.stop()
-                self.turn_count += 1
+                self.ev3.screen.clear()
+                self.ev3.screen.print("Press CENTER")
+                if Button.CENTER in self.ev3.buttons.pressed():
+                    wait(500)  # let go of the button / robot settle
+                    self.gyro_sensor.reset_angle(0)  # only reset here, never again
+                    self.x = 0.0
+                    self.y = 0.0
+                    self.theta = 0.0
+                    self.follow_dist = 0.0
+                    self.prev_left = self.left_motor.angle()
+                    self.prev_right = self.right_motor.angle()
+                    self.hit_saved = False
+                    self.watch.reset()
+                    self.state = "DRIVE"
+                continue
 
-                self.reference_dist = dist
-                self.last_screen_mode = None
+            if self.state == "DONE":
+                self.stop()
+                break
 
-                wait(1500)
+            if self.watch.time() > self.TIME_LIMIT_MS:
+                self.stop()
+                self.say("TIME UP")
+                break
 
-                self.wall_mode = "STRAIGHT"
-                self.prev_left = self.left_motor.angle()
-                self.prev_right = self.right_motor.angle()
-                self.follow_dist = 0.0
+            self.update_odometry()
+            wall = self.read_wall()
 
-                wait(300)
+            # ---------------- DRIVE: straight toward the obstacle ----------
+            if self.state == "DRIVE":
+                heading_deg = self.gyro_sensor.angle()  # CW positive
+                turn = clamp(-self.KP_HEADING * heading_deg, -40, 40)
+                self.steer(self.APPROACH_SPEED, turn)
 
-                self.hit_theta = self.theta
-                self.state = "SETTLE"
-                self.settle_counter = 0
+                if self.touch_sensor1.pressed():
+                    self.stop()
+                    self.ev3.speaker.beep()
+                    self.hit_x = self.x
+                    self.hit_y = self.y
+                    self.hit_saved = True
+                    self.bump_x = self.x
+                    self.bump_y = self.y
+                    self.say("HIT")
+                    self.state = "BACKUP"
 
-          elif self.state == "SETTLE":
-             self.left_motor.run(self.FORWARD_SPEED)
-             self.right_motor.run(self.FORWARD_SPEED)
-             self.settle_counter += 1
-             if self.settle_counter > 20:
-                  self.state = "FOLLOW"
+            # ---------------- BACKUP: reverse a fixed distance -------------
+            elif self.state == "BACKUP":
+                self.left_motor.run(-self.REVERSE_SPEED)
+                self.right_motor.run(-self.REVERSE_SPEED)
+                if self.dist_to(self.bump_x, self.bump_y) >= self.BACKUP_DIST:
+                    self.stop()
+                    self.begin_turn_right(90, "FOLLOW")
 
+            # ---------------- TURN: gyro-based right turn ------------------
+            elif self.state == "TURN":
+                remaining = self.turn_target - self.gyro_sensor.angle()
+                if remaining > 1:
+                    speed = clamp(remaining * 5, 40, self.TURN_SPEED)
+                    self.left_motor.run(speed)
+                    self.right_motor.run(-speed)
+                else:
+                    self.stop()
+                    wait(100)
+                    self.wall_f = self.ultrasonic_sensor.distance() / 1000.0
+                    self.wall_f = min(self.wall_f, self.MAX_US)
+                    self.has_wall = False
+                    self.track_dist = 0.0
+                    self.lost_phase = 0
+                    self.lost_count = 0
+                    self.wall_ref = self.gyro_sensor.angle()
+                    if self.after_turn == "FOLLOW":
+                        self.say("FOLLOW")
+                    elif self.after_turn == "RETURN":
+                        self.say("RETURN")
+                    self.state = self.after_turn
 
-          elif self.state == "FOLLOW":
-             
-              self.compute_position(self.left_motor.angle(), self.right_motor.angle())
-              dist_to_hit = self.distance_to_point(self.hit_x, self.hit_y)
-              gyro_now = self.gyro_sensor.angle()
-              dy = self.y - self.loop_origin_y
-              dx = self.x - self.loop_origin_x
-              dist_to_loop_origin = math.sqrt(dx * dx + dy * dy)
-              #angle_in_window = (self.LOOP_ANGLE_MIN <= gyro_now <= self.LOOP_ANGLE_MAX)
-              heading_error = self.theta - self.hit_theta
-              while heading_error > math.pi:
-                   heading_error -= 2 * math.pi
-              while heading_error < -math.pi:
-                   heading_error += 2 * math.pi
-              dist = self.ultrasonic_sensor.distance() / 1000.0
-              error = self.reference_dist - dist
-              if int(self.follow_dist * 10) % 5 == 0:
-                   """dist_to_hit = self.distance_to_point(self.hit_x, self.hit_y)
-                   self.ev3.screen.print("x={:.3f}, y={:.3f}, dist_to_hit={:.3f}, follow_dist={:.3f}".format(
-                           self.x, self.y, dist_to_hit, self.follow_dist
-                       ))"""
-                   self.ev3.screen.print("dist_to_hit={:.3f}, follow_dist={:.3f}".format(
-                           dist_to_hit, self.follow_dist
-                       ))
-                   """ self.ev3.screen.print("h_err={:.3f}".format(
-                           heading_error
-                       ))"""
-              if abs(error) < 0.04:
-                   #self.show_once("STRAIGHT", dist)
-                    # Target distance from the wall
-                    target_dist = 0.18
+            # ---------------- FOLLOW: wall on the left ---------------------
+            elif self.state == "FOLLOW":
+                self.follow_dist += abs(self.d_center)
 
-                    # Positive error means too close to wall
-                    error = target_dist - dist
+                # Bumped something ahead (inside corner): back up, turn right.
+                if self.touch_sensor1.pressed():
+                    self.stop()
+                    self.bump_x = self.x
+                    self.bump_y = self.y
+                    self.state = "BACKUP"
+                    continue
 
-                    # Gentle proportional steering correction
-                    Kp = 350
+                self.dbg += 1
+                if self.dbg % 25 == 0:
+                    self.ev3.screen.print("{:.2f}".format(wall))
+                self.follow_step(wall)
 
-                    turn = Kp * error
+                # Loop closure: gone far enough AND back near the hit point.
+                if (self.hit_saved and self.follow_dist > self.MIN_LOOP_DIST
+                        and self.dist_to(self.hit_x, self.hit_y) < self.HIT_RADIUS):
+                    self.stop()
+                    self.ev3.speaker.beep()
+                    self.say("BACK AT HIT")
+                    wait(300)
+                    # Turn RIGHT (away from the wall on our left) to face the start.
+                    bearing = math.atan2(self.start_y - self.y, self.start_x - self.x)
+                    rot = (self.theta - bearing) % (2 * math.pi)  # CW amount
+                    self.begin_turn_right(math.degrees(rot), "RETURN")
 
-                    # Limit how aggressively the robot can turn
-                    turn = max(min(turn, 25), -25)
+            # ---------------- RETURN: drive to the start -------------------
+            elif self.state == "RETURN":
+                dx = self.start_x - self.x
+                dy = self.start_y - self.y
+                dist_s = math.sqrt(dx * dx + dy * dy)
 
-                    # Wall is on LEFT side
-                    # Too close -> turn RIGHT
-                    # Too far -> turn LEFT
-                    left_speed = self.FORWARD_SPEED + turn
-                    right_speed = self.FORWARD_SPEED - turn
+                if dist_s <= self.MEASURE_OFFSET + 0.02:
+                    self.stop()
+                    self.ev3.speaker.beep()
+                    self.say("AT START")
+                    self.state = "DONE"
+                    continue
 
-                    self.left_motor.run(left_speed)
-                    self.right_motor.run(right_speed)
-
-              else:
-                   #self.show_once("CORRECT", dist)
-                   # too close
-                   if error > 0:
-                       turn = 1500 * error
-                       turn = min(turn, 80)
-                   else:
-                       far_error = -error
-                       if far_error < 0.02:
-                           turn = -12 # from -8 to -12
-                       elif far_error < 0.05:
-                           turn = -20 # from -28 to -30
-                       else:
-                           turn = -30 # from -30 to 35
-                   turn = max(min(turn, 80), -80)
-                   print("DIST: {:.3f} m, REF: {:.3f} m, m ERROR: {:.3f}, TURN: {:.1f}".format(dist, self.reference_dist, error, turn))
-                   self.left_motor.run(self.FORWARD_SPEED - turn)
-                   self.right_motor.run(self.FORWARD_SPEED + turn)
-              
-              if self.touch_sensor1.pressed():
-                #   or self.touch_sensor2.pressed()
-                 self.stop()
-                 self.reverse_counter = 0
-                 self.state = "REVERSE"
-
-              if self.hit_saved and not self.hit_reached_again and self.follow_dist > 4.0:
-               dist_to_hit = self.distance_to_point(self.hit_x, self.hit_y)
-
-
-               if dist_to_hit < 0.75: #and abs(heading_error) < 0.15: # tolerance from .15 to .12
-                   self.stop()
-                   self.ev3.speaker.beep()
-                   self.ev3.screen.print("BACK AT HIT POINT")
-                   self.hit_reached_again = True
-
-
-                   wait(1000)
-                   self.clearance_start_left = self.left_motor.angle()
-                   self.clearance_start_right = self.right_motor.angle()
-
-
-                   self.state = "TURN_TO_START"
-                   continue
-
-
-              """if self.hit_saved and not self.hit_reached_again and self.follow_dist > 1.0:
-                   if self.is_near_point(self.hit_x, self.hit_y, tolerance=0.15) and abs(heading_error) < 0.5: # tolerance from .15 to .12
-                       self.stop()
-                       self.ev3.speaker.beep()
-                       self.ev3.screen.print("BACK AT HIT POINT")
-                       self.hit_reached_again = True
-
-
-                       wait(1000)
-                       self.clearance_start_left = self.left_motor.angle()
-                       self.clearance_start_right = self.right_motor.angle()
-                      
-                       self.state = "MOVE_CLEAR"
-                       continue"""
-              
-          elif self.state == "MOVE_CLEAR":
-           left_change = abs(self.left_motor.angle() - self.clearance_start_left)
-           right_change = abs(self.right_motor.angle() - self.clearance_start_right)
-           move_amount = (left_change + right_change) / 2.0
-
-
-           if move_amount < self.CLEARANCE_DEG:
-               # move straight a little to create room for the turn
-               self.left_motor.run(self.FORWARD_SPEED)
-               self.right_motor.run(self.FORWARD_SPEED)
-           else:
-               self.stop()
-               wait(300)
-               self.turn_start_left = self.left_motor.angle()
-               self.turn_start_right = self.right_motor.angle()
-               self.state = "TURN_TO_START"
-
-
-          elif self.state == "TURN_TO_START":
-              left_change = abs(self.left_motor.angle() - self.turn_start_left)
-              right_change = abs(self.right_motor.angle() - self.turn_start_right)
-              turn_amount = (left_change + right_change) / 2.0
-
-
-              if turn_amount < self.TURN_DEG_90 * 1.25:
-                self.left_motor.run(self.TURN_SPEED)
-                self.right_motor.run(-self.TURN_SPEED)
-              else:
-                   self.stop()
-                   wait(500)
-                   self.prev_left = self.left_motor.angle()
-                   self.prev_right = self.right_motor.angle()
-                   self.theta = math.atan2(self.start_y - self.y, self.start_x - self.x)
-                   self.state = "RETURN_TO_START"
-
-
-          elif self.state == "RETURN_TO_START":
-
-
-           self.compute_position(self.left_motor.angle(), self.right_motor.angle())
-
-
-           dx = 0.0 - self.x
-           dy = 0.0 - self.y
-           dist_to_start = math.sqrt(dx * dx + dy * dy)
-           target_angle = math.atan2(dy, dx)
-           angle_error = target_angle - self.theta
-           while angle_error > math.pi:
-               angle_error -= 2 * math.pi
-           while angle_error < -math.pi:
-               angle_error += 2 * math.pi
-           correction = 80.0 * (angle_error / (math.pi / 2.0))
-           correction = max(min(correction, 60), -60)
-           self.left_motor.run(self.FORWARD_SPEED - correction)
-           self.right_motor.run(self.FORWARD_SPEED + correction + 1.25)
-
-
-           if self.start_saved and self.is_near_point(self.start_x, self.start_y, tolerance=0.12):
-               self.stop()
-               self.ev3.speaker.beep()
-               self.ev3.screen.print("BACK AT START POINT")
-               break
-          
-       # increase follow_dist
-       #  hardcode a decrease in the dist_to_hit if i know its going to hit a wall
+                bearing = math.atan2(dy, dx)
+                err = wrap_pi(bearing - self.theta)  # CCW positive
+                # target is CW (err<0) -> steer right (positive turn)
+                turn = clamp(-3.0 * math.degrees(err), -60, 60)
+                speed = clamp((dist_s - self.MEASURE_OFFSET) * 500, 60, self.RETURN_SPEED)
+                self.steer(speed, turn)
 
 
 def main():
-   lab3 = MyController()
-   lab3.run()
+    lab3 = MyController()
+    lab3.run()
 
 
 if __name__ == "__main__":
-   main()
-
-
-
+    main()
