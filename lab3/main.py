@@ -13,11 +13,22 @@ import math
 USE_GYRO = False  # True: use gyro S1; False: use ONLY wheel encoders
 DEBUG = True      # Print position/distance information periodically
 
-# Corner ARC SIZE: smaller radius -> a tighter turn around a convex corner.
-# Adjust ONE parameter at a time; 0.09 m is a starting estimate.
-ARC_RADIUS_M = 0.09
-ARC_EASE_DEG = 70       # Maintain the tight arc until this heading change
-ARC_EASE_FACTOR = 0.85 # After easing, keep 85% of the arc steering
+# Incremental search around OUTSIDE corners (wall on robot's LEFT).
+# When the side sensor loses the wall, advance beyond the corner,
+# then alternate a small LEFT turn and a short straight probe.
+# Stop and confirm several fresh ultrasonic readings before following
+# the next wall. A RIGHT turn is used to move away from a left wall.
+CORNER_INITIAL_ADVANCE_M = 0.030   # 3 cm past a lost-wall edge
+CORNER_STEP_DEG = 10.0             # small left pivots
+CORNER_PROBE_M = 0.040             # 4 cm forward after each pivot
+CORNER_REACQUIRE_M = 0.23          # wall must be within 23 cm
+CORNER_REACQUIRE_SAMPLES = 3       # fresh readings while STOPPED
+CORNER_SAMPLE_INTERVAL_MS = 100
+CORNER_STABILITY_TOL_M = 0.06      # readings within 6 cm of each other
+CORNER_TOO_CLOSE_M = 0.065        # use a cautious wall recovery if very close
+CORNER_MAX_TOTAL_TURN_DEG = 120.0
+CORNER_SEARCH_TIMEOUT_MS = 15000
+CORNER_TURN_SPEED = 145.0
 
 # Hit-point loop detection (meters and degrees).
 # The first test should leave REQUIRE_HEADING_MATCH=False to determine
@@ -99,11 +110,7 @@ class MyController:
 
         # Convex-corner detection / reacquisition.
         self.LOST_CONFIRM = 0.02  # travel after losing wall, meters
-        self.MIN_TRACK = 0.15
-        self.SEE_DIST = 0.28
-        self.SEE_LOOPS = 3
-        self.MIN_ARC = 8.0
-        self.MAX_ARC = 105.0
+        self.MIN_TRACK = 0.15     # unchanged for later wall segments
         self.KP_HUG = 400.0
         self.MAX_STEER_HUG = 90.0
         self.HUG_DIST = 0.20
@@ -111,9 +118,18 @@ class MyController:
         # later corners retain the already-working controller.
         self.FIRST_HUG_KP = 200.0
         self.FIRST_HUG_MAX_STEER = 30.0
-        self.ARC_RADIUS_M = ARC_RADIUS_M
-        self.ARC_EASE_DEG = ARC_EASE_DEG
-        self.ARC_EASE_FACTOR = ARC_EASE_FACTOR
+        # Incremental outside-corner search parameters.
+        self.CORNER_INITIAL_ADVANCE = CORNER_INITIAL_ADVANCE_M
+        self.CORNER_STEP_DEG = CORNER_STEP_DEG
+        self.CORNER_PROBE = CORNER_PROBE_M
+        self.CORNER_REACQUIRE = CORNER_REACQUIRE_M
+        self.CORNER_REACQUIRE_SAMPLES = CORNER_REACQUIRE_SAMPLES
+        self.CORNER_SAMPLE_INTERVAL_MS = CORNER_SAMPLE_INTERVAL_MS
+        self.CORNER_STABILITY_TOL = CORNER_STABILITY_TOL_M
+        self.CORNER_TOO_CLOSE = CORNER_TOO_CLOSE_M
+        self.CORNER_MAX_TOTAL_TURN = CORNER_MAX_TOTAL_TURN_DEG
+        self.CORNER_SEARCH_TIMEOUT_MS = CORNER_SEARCH_TIMEOUT_MS
+        self.CORNER_TURN_SPEED = CORNER_TURN_SPEED
 
         # Completion thresholds.
         self.HIT_RADIUS = HIT_RADIUS_M
@@ -160,12 +176,16 @@ class MyController:
         self.wall_ref = 0.0
         self.track_dist = 0.0
         self.has_wall = False
-        self.lost_phase = 0  # 0 normal, 2 arc, 3 hug, 4 search
+        self.lost_phase = 0  # 0 normal, 2 step-search, 3 hug
         self.lost_count = 0.0
-        self.see_count = 0
         self.hug_travel = 0.0
         self.hug_count = 0
         self.lost_heading = 0.0
+        self.corner_mode = "ADVANCE"  # ADVANCE -> TURN -> PROBE, repeat
+        self.corner_stage_distance = 0.0
+        self.corner_step_start_heading = 0.0
+        self.corner_start_ms = 0
+        self.corner_step_number = 0
         self.debug_counter = 0
         self.waiting_displayed = False
 
@@ -251,10 +271,15 @@ class MyController:
         self.track_dist = 0.0
         self.lost_phase = 0
         self.lost_count = 0.0
-        self.see_count = 0
         if self.first_follow_heading is None:
             # Record only ONCE, after the first right turn at the obstacle.
             self.first_follow_heading = self.heading()
+            # The first straight segment may be short. If the ultrasonic
+            # sensor is already looking at the wall after the initial turn,
+            # let the very first outside corner trigger without waiting for
+            # another 15 cm of tracked wall. Later segments are unchanged.
+            if 0.055 <= self.wall_f <= self.LOST_DIST:
+                self.has_wall = True
 
     # ----------------------- Wall following -----------------------------
 
@@ -270,12 +295,45 @@ class MyController:
         if abs(error) < 0.03:
             self.wall_ref += 0.03 * (self.heading() - self.wall_ref)
 
-    def start_arc(self):
-        self.say("ARC")
+    def start_corner_search(self):
+        """Start a measured search for the next LEFT-hand wall segment.
+
+        This is for outside/convex corners where the left-facing sensor
+        loses the wall. An inward corner is still handled by the bumper.
+        """
+        self.stop()
+        self.say("CORNER SEARCH")
         self.lost_phase = 2
         self.lost_count = 0.0
-        self.see_count = 0
         self.lost_heading = self.heading()
+        self.corner_mode = "ADVANCE"
+        self.corner_stage_distance = 0.0
+        self.corner_step_start_heading = self.heading()
+        self.corner_start_ms = self.clock.time()
+        self.corner_step_number = 0
+
+    def confirm_new_wall(self):
+        """Verify a new left wall while stopped, not from one passing echo.
+
+        This method is called after a short forward probe. Pausing prevents
+        a strong correction before the robot knows whether the echo is real.
+        """
+        readings = []
+        for _ in range(self.CORNER_REACQUIRE_SAMPLES):
+            measured = self.ultrasonic.distance() / 1000.0
+            readings.append(measured)
+            wait(self.CORNER_SAMPLE_INTERVAL_MS)
+
+        valid = all(0.055 <= value <= self.CORNER_REACQUIRE
+                    for value in readings)
+        stable = (max(readings) - min(readings)
+                  <= self.CORNER_STABILITY_TOL)
+        print("CORNER CHECK:", readings, "valid=", valid,
+              "stable=", stable)
+        if valid and stable:
+            self.wall_f = sum(readings) / len(readings)
+            return True
+        return False
 
     def start_hug(self):
         self.hug_count += 1
@@ -283,7 +341,6 @@ class MyController:
         self.lost_phase = 3
         self.hug_travel = 0.0
         self.lost_count = 0.0
-        self.see_count = 0
 
     def follow_step(self, wall):
         # Phase 0: normal wall following.
@@ -301,31 +358,69 @@ class MyController:
                 if self.lost_count < self.LOST_CONFIRM:
                     self.steer(self.FOLLOW_SPEED, 0)
                 else:
-                    self.start_arc()
+                    self.start_corner_search()
 
-        # Phase 2: arc LEFT around a convex corner to reacquire the wall.
+        # Phase 2: incremental OUTSIDE-corner search. Wall remains on LEFT.
         elif self.lost_phase == 2:
-            turned_left = self.lost_heading - self.heading()
-            if wall < self.SEE_DIST and turned_left >= self.MIN_ARC:
-                self.see_count += 1
-            else:
-                self.see_count = 0
+            if self.clock.time() - self.corner_start_ms >= self.CORNER_SEARCH_TIMEOUT_MS:
+                self.stop()
+                self.say("CORNER TIMEOUT")
+                self.state = "DONE"
+                return
 
-            if self.see_count >= self.SEE_LOOPS:
-                self.start_hug()
-            elif turned_left >= self.MAX_ARC:
-                self.say("SEARCH")
-                self.lost_phase = 4
-            else:
-                # Approximate turning radius for differential drive:
-                # radius = (wheelbase/2) * speed/abs(steer).
-                steer_magnitude = (self.CORNER_SPEED * self.WHEEL_BASE /
-                                   (2.0 * self.ARC_RADIUS_M))
-                if turned_left >= self.ARC_EASE_DEG:
-                    steer_magnitude *= self.ARC_EASE_FACTOR
-                steer_magnitude = clamp(steer_magnitude, 5.0,
-                                        self.CORNER_SPEED * 0.95)
-                self.steer(self.CORNER_SPEED, -steer_magnitude)
+            # First give the body room to clear the corner before pivoting.
+            if self.corner_mode == "ADVANCE":
+                self.corner_stage_distance += max(0.0, self.d_center)
+                if self.corner_stage_distance >= self.CORNER_INITIAL_ADVANCE:
+                    self.stop()
+                    self.corner_mode = "TURN"
+                    self.corner_step_start_heading = self.heading()
+                else:
+                    self.steer(self.CORNER_SPEED, 0.0)
+
+            # Pivot LEFT by a small amount; wheel encoders or gyro are used
+            # depending on USE_GYRO, exactly as for the main 90-degree turn.
+            elif self.corner_mode == "TURN":
+                turn_left = self.corner_step_start_heading - self.heading()
+                total_left = self.lost_heading - self.heading()
+                if total_left >= self.CORNER_MAX_TOTAL_TURN:
+                    self.stop()
+                    self.say("CORNER NOT FOUND")
+                    self.state = "DONE"
+                    return
+                if turn_left >= self.CORNER_STEP_DEG - 2.0:
+                    self.stop()
+                    self.corner_mode = "PROBE"
+                    self.corner_stage_distance = 0.0
+                    self.corner_step_number += 1
+                    print("CORNER: step {} heading={:.1f}".format(
+                        self.corner_step_number, self.heading()))
+                else:
+                    self.left_motor.run(-self.CORNER_TURN_SPEED)
+                    self.right_motor.run(self.CORNER_TURN_SPEED)
+
+            # Move only a short distance, then STOP to confirm the wall.
+            # This prevents a fleeting echo from sending us into a sharp HUG
+            # correction at the first (or any other) outside corner.
+            else:  # corner_mode == "PROBE"
+                self.corner_stage_distance += max(0.0, self.d_center)
+                if wall <= self.CORNER_TOO_CLOSE:
+                    # Do not continue probing straight when the wall is very
+                    # close. Leave the controller a chance to steer away.
+                    self.stop()
+                    self.wall_f = wall
+                    self.start_hug()
+                elif self.corner_stage_distance >= self.CORNER_PROBE:
+                    self.stop()
+                    if self.confirm_new_wall():
+                        print("CORNER: verified wall at {:.3f} m".format(
+                            self.wall_f))
+                        self.start_hug()
+                    else:
+                        self.corner_mode = "TURN"
+                        self.corner_step_start_heading = self.heading()
+                else:
+                    self.steer(self.CORNER_SPEED, 0.0)
 
         # Phase 3: temporarily hug the new wall before regular tracking.
         elif self.lost_phase == 3:
@@ -334,7 +429,7 @@ class MyController:
             if wall > self.LOST_DIST:
                 self.lost_count += abs(self.d_center)
                 if self.lost_count >= self.LOST_CONFIRM:
-                    self.start_arc()
+                    self.start_corner_search()
                 else:
                     self.steer(self.CORNER_SPEED, 0)
             else:
@@ -354,12 +449,12 @@ class MyController:
                     self.lost_phase = 0
                     self.lost_count = 0.0
 
-        # Phase 4: no wall after the maximum arc; search forward.
+        # Any unexpected search phase stops safely rather than driving
+        # unboundedly without seeing a wall.
         else:
-            if wall <= self.LOST_DIST:
-                self.start_hug()
-            else:
-                self.steer(self.CORNER_SPEED, -8)
+            self.stop()
+            self.say("WALL LOST")
+            self.state = "DONE"
 
     # --------------------- Loop completion ------------------------------
 
@@ -487,6 +582,8 @@ class MyController:
                     continue
 
                 self.follow_step(wall)
+                if self.state == "DONE":
+                    continue
                 self.debug_counter += 1
                 if DEBUG and self.debug_counter % 50 == 0:
                     hit_dist = self.dist_to(self.hit_x, self.hit_y)
