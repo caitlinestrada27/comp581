@@ -20,11 +20,14 @@ ARC_EASE_DEG = 70       # Maintain the tight arc until this heading change
 ARC_EASE_FACTOR = 0.85 # After easing, keep 85% of the arc steering
 
 # Hit-point loop detection (meters and degrees).
-HIT_RADIUS_M = 0.24       # Must re-enter this circle around original hit
-HIT_EXIT_RADIUS_M = 0.42  # Must first have LEFT this larger circle
-MIN_LOOP_DIST_M = 1.40    # Must also have traveled at least this much
-REQUIRE_HEADING_MATCH = True
-HIT_HEADING_TOL_DEG = 50  # Compare with heading at beginning of first FOLLOW
+# The first test should leave REQUIRE_HEADING_MATCH=False to determine
+# whether encoder heading drift was blocking loop recognition.
+# These thresholds are starting calibrations, not a guarantee of completion.
+HIT_RADIUS_M = 0.32       # Consider the hit point reached within 32 cm
+HIT_EXIT_RADIUS_M = 0.42  # First leave this larger region
+MIN_LOOP_DIST_M = 1.20    # Minimum measured boundary travel before returning
+REQUIRE_HEADING_MATCH = False
+HIT_HEADING_TOL_DEG = 50  # Used only if REQUIRE_HEADING_MATCH=True
 
 # When the perimeter is complete, do NOT rotate in place beside the wall.
 # Arc forward and RIGHT (away from the wall on the robot's left) first.
@@ -104,6 +107,10 @@ class MyController:
         self.KP_HUG = 400.0
         self.MAX_STEER_HUG = 90.0
         self.HUG_DIST = 0.20
+        # Only the FIRST wall reacquisition gets gentler steering;
+        # later corners retain the already-working controller.
+        self.FIRST_HUG_KP = 200.0
+        self.FIRST_HUG_MAX_STEER = 30.0
         self.ARC_RADIUS_M = ARC_RADIUS_M
         self.ARC_EASE_DEG = ARC_EASE_DEG
         self.ARC_EASE_FACTOR = ARC_EASE_FACTOR
@@ -157,6 +164,7 @@ class MyController:
         self.lost_count = 0.0
         self.see_count = 0
         self.hug_travel = 0.0
+        self.hug_count = 0
         self.lost_heading = 0.0
         self.debug_counter = 0
         self.waiting_displayed = False
@@ -270,7 +278,8 @@ class MyController:
         self.lost_heading = self.heading()
 
     def start_hug(self):
-        self.say("HUG")
+        self.hug_count += 1
+        self.say("HUG {}".format(self.hug_count))
         self.lost_phase = 3
         self.hug_travel = 0.0
         self.lost_count = 0.0
@@ -331,8 +340,15 @@ class MyController:
             else:
                 self.lost_count = 0.0
                 error = self.TARGET_DIST - wall
-                turn = clamp(self.KP_HUG * error,
-                             -self.MAX_STEER_HUG, self.MAX_STEER_HUG)
+                if self.hug_count == 1:
+                    # First corner: reduce abrupt steering into next wall.
+                    turn = clamp(self.FIRST_HUG_KP * error,
+                                 -self.FIRST_HUG_MAX_STEER,
+                                 self.FIRST_HUG_MAX_STEER)
+                else:
+                    # Other corners: preserve the already-working response.
+                    turn = clamp(self.KP_HUG * error,
+                                 -self.MAX_STEER_HUG, self.MAX_STEER_HUG)
                 self.steer(self.CORNER_SPEED, turn)
                 if self.hug_travel >= self.HUG_DIST:
                     self.lost_phase = 0
@@ -391,6 +407,7 @@ class MyController:
                     self.hit_saved = False
                     self.left_hit_region = False
                     self.first_follow_heading = None
+                    self.hug_count = 0
                     self.debug_counter = 0
                     self.exit_travel = 0.0
                     self.exit_clear_readings = 0
@@ -472,11 +489,17 @@ class MyController:
                 self.follow_step(wall)
                 self.debug_counter += 1
                 if DEBUG and self.debug_counter % 50 == 0:
-                    print("FOLLOW distance={:.2f}m hit={:.2f}m "
-                          "heading={:.0f}deg arc_phase={}".format(
-                              self.follow_dist,
-                              self.dist_to(self.hit_x, self.hit_y),
-                              self.heading(), self.lost_phase))
+                    hit_dist = self.dist_to(self.hit_x, self.hit_y)
+                    heading_err = 0.0
+                    if self.first_follow_heading is not None:
+                        heading_err = abs(wrap_degrees(
+                            self.heading() - self.first_follow_heading))
+                    print("HIT CHECK: dist={:.2f}m traveled={:.2f}m "
+                          "left_region={} heading_error={:.1f}deg "
+                          "phase={} hug={}".format(
+                              hit_dist, self.follow_dist,
+                              self.left_hit_region, heading_err,
+                              self.lost_phase, self.hug_count))
 
                 if self.back_at_hit():
                     self.stop()
