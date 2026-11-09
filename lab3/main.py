@@ -18,10 +18,14 @@ DEBUG = True      # Print position/distance information periodically
 # then alternate a small LEFT turn and a short straight probe.
 # Stop and confirm several fresh ultrasonic readings before following
 # the next wall. A RIGHT turn is used to move away from a left wall.
-CORNER_INITIAL_ADVANCE_M = 0.015   # 3 cm past a lost-wall edge
-CORNER_STEP_DEG = 12.0             # small left pivots
-CORNER_PROBE_M = 0.1             # 10 cm forward after each pivot
-CORNER_REACQUIRE_M = 0.30         # wall must be within 30 cm
+CORNER_INITIAL_ADVANCE_M = 0.08    # drive until the AXLE clears the corner (~ sonar-ahead-of-axle minus 2 cm)
+CORNER_STEP_DEG = 15.0             # small left pivots
+CORNER_PROBE_M = 0.04            # 4 cm forward after each pivot (R ~ 15 cm)
+CORNER_REACQUIRE_M = 0.50         # wall must be within 35 cm
+CORNER_FALLBACK_DEG = 90.0         # after this much turn, probe straight once
+CORNER_FALLBACK_STRAIGHT_M = 0.08  # length of that one longer probe
+HUG_SLOPE_WINDOW_M = 0.08          # travel used to estimate the new wall's angle
+FOLLOW_TOO_CLOSE_M = 0.08          # closer than this: always steer away
 CORNER_REACQUIRE_SAMPLES = 3       # fresh readings while STOPPED
 CORNER_SAMPLE_INTERVAL_MS = 100
 CORNER_STABILITY_TOL_M = 0.06      # readings within 6 cm of each other
@@ -101,7 +105,7 @@ class MyController:
         self.KP_HEADING = 3.0
 
         # Straight-wall controller (left-hand wall).
-        self.TARGET_DIST = 0.15
+        self.TARGET_DIST = 0.12
         self.KP_WALL = 250.0
         self.KP_YAW = 2.0
         self.MAX_STEER = 45.0
@@ -186,6 +190,11 @@ class MyController:
         self.corner_step_start_heading = 0.0
         self.corner_start_ms = 0
         self.corner_step_number = 0
+        self.corner_probe_len = CORNER_PROBE_M
+        self.corner_fallback_done = False
+        self.hug_slope_travel = 0.0
+        self.hug_slope_wall = 0.0
+        self.hug_slope_heading = 0.0
         self.debug_counter = 0
         self.waiting_displayed = False
 
@@ -289,7 +298,12 @@ class MyController:
                          -0.7, 0.7)
         approx_perpendicular_dist = wall * math.cos(yaw_left)
         error = self.TARGET_DIST - approx_perpendicular_dist
-        turn = self.KP_WALL * error + self.KP_YAW * math.degrees(yaw_left)
+        # Cap the yaw-hold term so a crooked wall_ref can never cancel the
+        # distance correction and drive the robot into the wall.
+        yaw_term = clamp(self.KP_YAW * math.degrees(yaw_left), -10.0, 10.0)
+        turn = self.KP_WALL * error + yaw_term
+        if approx_perpendicular_dist < FOLLOW_TOO_CLOSE_M:
+            turn = max(turn, 30.0)   # too close: always steer away (right)
         self.steer(self.FOLLOW_SPEED, clamp(turn, -self.MAX_STEER,
                                            self.MAX_STEER))
         if abs(error) < 0.03:
@@ -311,6 +325,8 @@ class MyController:
         self.corner_step_start_heading = self.heading()
         self.corner_start_ms = self.clock.time()
         self.corner_step_number = 0
+        self.corner_probe_len = self.CORNER_PROBE
+        self.corner_fallback_done = False
 
     def confirm_new_wall(self):
         """Verify a new left wall while stopped, not from one passing echo.
@@ -324,14 +340,15 @@ class MyController:
             readings.append(measured)
             wait(self.CORNER_SAMPLE_INTERVAL_MS)
 
-        valid = all(0.055 <= value <= self.CORNER_REACQUIRE
-                    for value in readings)
-        stable = (max(readings) - min(readings)
-                  <= self.CORNER_STABILITY_TOL)
+        good = [v for v in readings
+                if 0.055 <= v <= self.CORNER_REACQUIRE]
+        valid = len(good) >= 2                      # 2 of 3, not all 3
+        stable = valid and (max(good) - min(good)
+                            <= self.CORNER_STABILITY_TOL)
         print("CORNER CHECK:", readings, "valid=", valid,
               "stable=", stable)
         if valid and stable:
-            self.wall_f = sum(readings) / len(readings)
+            self.wall_f = sum(good) / len(good)
             return True
         return False
 
@@ -341,6 +358,10 @@ class MyController:
         self.lost_phase = 3
         self.hug_travel = 0.0
         self.lost_count = 0.0
+        self.wall_ref = self.heading()
+        self.hug_slope_travel = 0.0
+        self.hug_slope_wall = self.wall_f
+        self.hug_slope_heading = self.heading()
 
     def follow_step(self, wall):
         # Phase 0: normal wall following.
@@ -393,8 +414,16 @@ class MyController:
                     self.corner_mode = "PROBE"
                     self.corner_stage_distance = 0.0
                     self.corner_step_number += 1
-                    print("CORNER: step {} heading={:.1f}".format(
-                        self.corner_step_number, self.heading()))
+                    # One longer straight probe once ~90 deg has been turned.
+                    if (total_left >= CORNER_FALLBACK_DEG
+                            and not self.corner_fallback_done):
+                        self.corner_fallback_done = True
+                        self.corner_probe_len = CORNER_FALLBACK_STRAIGHT_M
+                    else:
+                        self.corner_probe_len = self.CORNER_PROBE
+                    print("CORNER: step {} left={:.1f} raw_mm={} filt={:.3f}"
+                          .format(self.corner_step_number, total_left,
+                                  self.ultrasonic.distance(), self.wall_f))
                 else:
                     self.left_motor.run(-self.CORNER_TURN_SPEED)
                     self.right_motor.run(self.CORNER_TURN_SPEED)
@@ -420,7 +449,7 @@ class MyController:
                         print("WALL CONFIRMED:", self.wall_f)
                         self.start_hug()
 
-                    elif self.corner_stage_distance >= self.CORNER_PROBE:
+                    elif self.corner_stage_distance >= self.corner_probe_len:
                         self.corner_mode = "TURN"
                         self.corner_step_start_heading = self.heading()
 
@@ -428,7 +457,7 @@ class MyController:
                         self.steer(self.CORNER_SPEED, 0.0)
 
                 # Completed the probe without finding a wall.
-                elif self.corner_stage_distance >= self.CORNER_PROBE:
+                elif self.corner_stage_distance >= self.corner_probe_len:
                     self.stop()
                     self.corner_mode = "TURN"
                     self.corner_step_start_heading = self.heading()
@@ -439,9 +468,8 @@ class MyController:
 
         # Phase 3: temporarily hug the new wall before regular tracking.
         elif self.lost_phase == 3:
-            self.wall_ref = self.heading()
             self.hug_travel += abs(self.d_center)
-            if wall > self.LOST_DIST:
+            if wall > self.CORNER_REACQUIRE:
                 self.lost_count += abs(self.d_center)
                 if self.lost_count >= self.LOST_CONFIRM:
                     self.start_corner_search()
@@ -450,15 +478,38 @@ class MyController:
             else:
                 self.lost_count = 0.0
                 error = self.TARGET_DIST - wall
+
+                # Estimate the new wall's direction from how the sonar
+                # reading changes with travel (reading falls when the robot
+                # is angled toward the wall), so wall_ref is truly parallel.
+                ds = self.hug_travel - self.hug_slope_travel
+                if ds >= HUG_SLOPE_WINDOW_M:
+                    slope = (wall - self.hug_slope_wall) / ds
+                    angle_in = clamp(math.degrees(math.atan(-slope)),
+                                     -30.0, 30.0)  # + = heading toward wall
+                    mid_heading = 0.5 * (self.hug_slope_heading
+                                         + self.heading())
+                    new_ref = mid_heading + angle_in
+                    self.wall_ref = 0.5 * self.wall_ref + 0.5 * new_ref
+                    if DEBUG:
+                        print("HUG: wall={:.3f} slope={:.2f} angle_in={:.1f}"
+                              .format(wall, slope, angle_in))
+                    self.hug_slope_travel = self.hug_travel
+                    self.hug_slope_wall = wall
+                    self.hug_slope_heading = self.heading()
+
+                yaw_deg = clamp(self.wall_ref - self.heading(), -30.0, 30.0)
                 if self.hug_count == 1:
-                    # First corner: reduce abrupt steering into next wall.
-                    turn = clamp(self.FIRST_HUG_KP * error,
-                                 -self.FIRST_HUG_MAX_STEER,
-                                 self.FIRST_HUG_MAX_STEER)
+                    # First corner: gentle toward the wall, strong away.
+                    turn = clamp(self.FIRST_HUG_KP * error
+                                 + self.KP_YAW * yaw_deg,
+                                 -self.FIRST_HUG_MAX_STEER, 45.0)
                 else:
-                    # Other corners: preserve the already-working response.
-                    turn = clamp(self.KP_HUG * error,
+                    turn = clamp(self.KP_HUG * error
+                                 + self.KP_YAW * yaw_deg,
                                  -self.MAX_STEER_HUG, self.MAX_STEER_HUG)
+                if wall < FOLLOW_TOO_CLOSE_M:
+                    turn = max(turn, 30.0)   # too close: steer away
                 self.steer(self.CORNER_SPEED, turn)
                 if self.hug_travel >= self.HUG_DIST:
                     self.lost_phase = 0
