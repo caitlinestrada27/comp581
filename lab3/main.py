@@ -1,10 +1,37 @@
 #!/usr/bin/env pybricks-micropython
-# COMP 581 Lab 3 
+# COMP 581 Lab 3
 # Caitlin Estrada (730661469) and Madeline Clark (730650946)
+#
+# Strategy
+#   DRIVE   straight until the bumper hits the obstacle (beep, save hit point)
+#   BACKUP  a few cm, TURN right 90 deg so the wall is on the robot's LEFT
+#   FOLLOW  the wall with the left-facing ultrasonic sensor:
+#             TRACK    wall visible -> steer using an estimate of the robot's
+#                      distance AND angle to the wall. The angle comes from
+#                      the wheel encoders, corrected slowly by the sonar.
+#                      (Needed because the sonar is BEHIND the axle: steering
+#                      on the raw sonar reading alone is unstable.)
+#             CORNER   wall lost = the sonar just passed an outside corner.
+#                      Remember where that corner is, then repeat:
+#                        drive straight until the SONAR is past the corner
+#                        along the current heading; if it sees a wall there,
+#                        go back to TRACK; if not, pivot left one step.
+#                      The next wall is found by sensing, not by bumping,
+#                      whether the corner is gentle or sharp.
+#           Bumper hit (inside corner) -> BACKUP, TURN right, FOLLOW again
+#   Loop is complete when the robot has turned about a full circle to the
+#   left AND has passed its closest approach to the saved hit point.
+#   PEEL    arc right, away from the wall, until facing the start
+#   RETURN  drive to the start and stop with the measuring point on the star
+#
+# Creative contribution: once the robot has STOPPED, it reports how the run
+# went. Back at the start: green light, a face on the screen and a victory
+# fanfare. Out of time or blocked: red light and a sad falling tune. Both
+# tunes are our own, played one note at a time with speaker.beep().
 
 from pybricks.hubs import EV3Brick
 from pybricks.ev3devices import Motor, TouchSensor, UltrasonicSensor, GyroSensor
-from pybricks.parameters import Port, Button
+from pybricks.parameters import Port, Button, Color
 from pybricks.tools import wait, StopWatch
 import math
 
@@ -34,22 +61,32 @@ SONAR_SIDE_M = 0.075        # robot centerline to the sonar's front face
 MEASURE_AHEAD_M = 0.06      # axle to measuring point (tip of the bumper)
 
 # ============================ WALL FOLLOWING =============================
-TARGET_DIST_M = 0.10        # desired sonar reading while following
+TARGET_DIST_M = 0.09        # desired sonar reading while following
 LOST_DIST_M = 0.30          # reading above this = wall not visible
 TOO_CLOSE_M = 0.06          # below this always steer away
 FOLLOW_SPEED = 220.0        # wheel deg/s (about 12 cm/s)
-ARC_SPEED = 180.0           # wheel deg/s while rounding an outside corner
+# If a lap is too slow for the 2-minute limit, a faster set that also worked
+# in simulation is FOLLOW_SPEED 270, ARC_SPEED 220, CORNER_TURN_SPEED 140.
+ARC_SPEED = 180.0           # wheel deg/s during corner probes and the exit arc
 K_ANGLE = 2.4               # how hard to correct the angle to the wall (1/s)
 K_DIST = 7.0                # approach angle (rad) per meter of distance error
-MAX_APPROACH_DEG = 20.0     # never angle in/out more steeply than this
+MAX_APPROACH_DEG = 15.0     # never angle in/out more steeply than this
+                            # (the sonar goes blind at steep angles)
+COAST_ANGLE_DEG = 12.0      # wall lost while angled more than this: assume
+                            # the angle blinded the sonar, not a corner
+COAST_MAX_M = 0.12          # ...and straighten up for at most this far
+K_CURVE = 15.0              # learns a steady turn rate for curved walls
 EST_DIST_GAIN = 0.12        # sonar correction of the distance estimate
 EST_ANGLE_GAIN = 250.0      # sonar correction of the angle estimate
-ACQUIRE_ANGLE_DEG = 30.0    # assumed angle away from a wall first seen in ARC
 LOST_CONFIRM_M = 0.02       # travel with no wall before reacting
-MIN_TRACK_M = 0.10          # wall must be tracked this far to use ADVANCE
-ARC_BLIND_DEG = 20.0        # ignore the sonar for the first part of an arc
-                            # (it can still see the wall just left behind)
-ARC_MAX_TURN_DEG = 330.0    # give up if a full circle finds no wall
+
+# ========================= OUTSIDE CORNER SEARCH =========================
+CORNER_STEP_DEG = 30.0      # left pivot between straight probes
+CORNER_PAST_M = 0.0         # sonar must be this far past the corner (along
+                            # the current heading) before a reading counts
+CORNER_CONFIRM_M = 0.04     # ...and the wall must stay visible this far
+CORNER_TURN_SPEED = 110.0   # wheel deg/s while pivoting
+CORNER_MAX_TURN_DEG = 300.0 # give up if nearly a full circle finds no wall
 
 # ============================ OTHER MOTIONS ==============================
 APPROACH_SPEED = 220.0
@@ -70,21 +107,19 @@ LOOP_MIN_TURN_DEG = 250.0   # net LEFT turn required before checking hit point
 LOOP_FORCE_TURN_DEG = 450.0 # odometry drifted badly: call the loop done anyway
 HIT_RADIUS_M = 0.45         # closest approach must be inside this radius
 
-TIME_LIMIT_MS = 118000
+TIME_LIMIT_MS = 116000      # stop driving here; leaves time for the sad tune
+
+# ================================ FINALE =================================
+# (frequency in Hz, length in ms); frequency 0 is a rest.
+VICTORY_TUNE = [(523, 120), (659, 120), (784, 120), (1047, 240), (0, 60),
+                (784, 120), (1047, 420)]
+SAD_TUNE = [(392, 260), (370, 260), (349, 260), (330, 600)]
 LOOP_MS = 20
 DEBUG = True
 # =========================================================================
 
 # Distance from the wall to the middle of the axle when following correctly.
 AXLE_TARGET_M = TARGET_DIST_M + SONAR_SIDE_M
-# Radius of the left arc around an outside corner. A sonar behind the axle
-# only sees the next wall once it has travelled past the corner, so that
-# layout needs a wider arc.
-ARC_RADIUS_M = AXLE_TARGET_M + max(0.0, -SONAR_AHEAD_M - 0.02)
-# How far the axle must move (+ forward, - backward) to sit just short of
-# the corner once the wall has been lost for LOST_CONFIRM_M.
-CORNER_SHIFT_M = SONAR_AHEAD_M - LOST_CONFIRM_M - (0.02 if SONAR_AHEAD_M < 0
-                                                   else 0.0)
 # Wheel deg/s of steering that turns the robot body at 1 rad/s.
 STEER_PER_RAD_S = math.degrees(WHEEL_BASE_M / (2.0 * WHEEL_RADIUS_M))
 
@@ -137,10 +172,17 @@ class Robot:
         self.readings = [LOST_DIST_M, LOST_DIST_M, LOST_DIST_M]
         self.wall_d = AXLE_TARGET_M   # estimated axle-to-wall distance
         self.wall_phi = 0.0           # estimated angle, + = nose toward wall
+        self.curve_rate = 0.0         # learned steady left turn rate (rad/s)
         self.track_dist = 0.0
         self.lost_travel = 0.0
-        self.shift_dist = 0.0
-        self.arc_start_heading = 0.0
+        self.last_wall = TARGET_DIST_M   # last sonar reading that saw a wall
+        self.corner_x = 0.0           # where the wall ended (outside corner)
+        self.corner_y = 0.0
+        self.corner_start_heading = 0.0
+        self.corner_pivoting = False
+        self.pivot_target = 0.0
+        self.seen_travel = 0.0
+        self.seen_first = 0.0         # first reading of a newly seen wall
         self.follow_dist = 0.0
         self.first_follow_heading = None
         self.loop_min_d = 99.0
@@ -149,6 +191,7 @@ class Robot:
         self.stuck_travel = 0.0
         self.return_min_d = 99.0
         self.debug_counter = 0
+        self.outcome = "gave up"     # becomes "home" or "time up"
 
     # ------------------------------ helpers ------------------------------
 
@@ -160,6 +203,34 @@ class Robot:
         # Positive turn curves RIGHT; negative turn curves LEFT.
         self.left_motor.run(speed + turn)
         self.right_motor.run(speed - turn + TRIM)
+
+    def finale(self):
+        """Creative contribution: announce how the run ended.
+
+        Called only after the motors have stopped, so it never affects the
+        driving or the finishing position.
+        """
+        if self.outcome == "home":
+            self.ev3.light.on(Color.GREEN)
+            self.ev3.screen.clear()
+            self.ev3.screen.print("  ^   ^")
+            self.ev3.screen.print("  \\___/")
+            self.ev3.screen.print("HOME!")
+            tune = VICTORY_TUNE
+        else:
+            self.ev3.light.on(Color.RED)
+            self.ev3.screen.clear()
+            self.ev3.screen.print("  -   -")
+            self.ev3.screen.print("  /```\\")
+            self.ev3.screen.print(self.outcome)
+            tune = SAD_TUNE
+        for frequency, duration in tune:
+            if frequency > 0:
+                self.ev3.speaker.beep(frequency, duration)
+            else:
+                wait(duration)
+            wait(30)
+        wait(1500)
 
     def say(self, message):
         self.ev3.screen.clear()
@@ -207,7 +278,10 @@ class Robot:
 
     def is_stuck(self, now):
         """True if the wheels have barely moved for STUCK_MS."""
-        self.stuck_travel += abs(self.d_center)
+        # Count wheel movement, so pivoting in place is not "stuck".
+        self.stuck_travel += (abs(self.d_center)
+                              + math.radians(abs(self.d_heading))
+                              * WHEEL_BASE_M / 2.0)
         if now - self.stuck_start_ms < STUCK_MS:
             return False
         stuck = self.stuck_travel < 0.015
@@ -245,11 +319,13 @@ class Robot:
         """Start the distance/angle estimate from one sonar reading."""
         wall = min(wall, LOST_DIST_M)
         self.wall_phi = phi
+        self.curve_rate = 0.0
         self.wall_d = ((wall + SONAR_SIDE_M) * math.cos(phi)
                        + SONAR_AHEAD_M * math.sin(phi))
 
     def update_wall_estimate(self, wall):
         """Track distance (axle to wall) and angle (+ = nose toward wall).
+        Pass wall=None when the sonar sees nothing (encoders only).
 
         Prediction uses the wheel encoders: a left turn increases the angle,
         and driving at an angle changes the distance. The sonar then nudges
@@ -259,7 +335,7 @@ class Robot:
         self.wall_phi -= math.radians(self.d_heading)
         self.wall_d -= self.d_center * math.sin(self.wall_phi)
         c = math.cos(self.wall_phi)
-        if c > 0.3:
+        if wall is not None and c > 0.3:
             predicted = ((self.wall_d - SONAR_AHEAD_M * math.sin(self.wall_phi))
                          / c - SONAR_SIDE_M)
             surprise = clamp(wall - predicted, -0.05, 0.05)
@@ -274,20 +350,101 @@ class Robot:
         # Too far -> aim the nose toward the wall, too close -> away from it.
         wanted_phi = clamp(K_DIST * (self.wall_d - AXLE_TARGET_M),
                            -limit, limit)
-        turn_left = K_ANGLE * (wanted_phi - self.wall_phi)     # rad/s
+        # A wall that curves away needs a steady left turn on top of the
+        # corrections; learn it from distance error that will not go away.
+        self.curve_rate = clamp(
+            self.curve_rate + K_CURVE * (self.wall_d - AXLE_TARGET_M)
+            * abs(self.d_center), -0.2, 0.5)
+        turn_left = (K_ANGLE * (wanted_phi - self.wall_phi)
+                     + self.curve_rate)                        # rad/s
         turn = -turn_left * STEER_PER_RAD_S
-        # Never curve left tighter than the corner arc; allow a harder right.
-        left_limit = FOLLOW_SPEED * WHEEL_BASE_M / (2.0 * ARC_RADIUS_M)
+        # Limit how tightly it curls toward the wall; allow a harder right.
+        left_limit = FOLLOW_SPEED * WHEEL_BASE_M / (2.0 * AXLE_TARGET_M)
         turn = clamp(turn, -left_limit, 0.5 * FOLLOW_SPEED)
-        if wall < TOO_CLOSE_M:
+        if wall is not None and wall < TOO_CLOSE_M:
             turn = max(turn, 0.3 * FOLLOW_SPEED)
         self.steer(FOLLOW_SPEED, turn)
 
-    def start_arc(self):
-        self.mode = "ARC"
-        self.arc_start_heading = self.heading_cw
+    def start_corner(self):
+        """The wall just ended. Work out where its end (the corner) is."""
+        a = -math.radians(self.heading_cw)
+        ahead_x, ahead_y = math.cos(a), math.sin(a)       # robot's forward
+        left_x, left_y = -math.sin(a), math.cos(a)        # robot's left
+        # The sonar was this far along the robot when the wall vanished...
+        along = SONAR_AHEAD_M - self.lost_travel
+        # ...and the wall was this far to the left of the robot's centerline.
+        if self.track_dist > 0.02:
+            side = self.last_wall + SONAR_SIDE_M
+        else:
+            side = AXLE_TARGET_M
+        self.corner_x = self.x + along * ahead_x + side * left_x
+        self.corner_y = self.y + along * ahead_y + side * left_y
+        self.corner_start_heading = self.heading_cw
+        self.corner_pivoting = False
+        self.seen_travel = 0.0
+        self.mode = "CORNER"
         if DEBUG:
-            print("ARC")
+            print("CORNER")
+
+    def corner_step(self, wall, seen, step):
+        turned = self.corner_start_heading - self.heading_cw
+
+        if self.corner_pivoting:
+            remaining = self.pivot_target - turned
+            if remaining <= 1.5:
+                self.corner_pivoting = False
+                self.seen_travel = 0.0
+                self.stop()
+            else:
+                speed = clamp(remaining * 6.0, 40.0, CORNER_TURN_SPEED)
+                self.left_motor.run(-speed)
+                self.right_motor.run(speed)
+            return
+
+        # Straight probe. How far is the SONAR past the corner, measured
+        # along the direction the robot is now facing? Until it is past,
+        # the next wall cannot be in front of the sonar, and anything it
+        # hears is the old wall or the corner edge.
+        a = -math.radians(self.heading_cw)
+        past = ((self.x - self.corner_x) * math.cos(a)
+                + (self.y - self.corner_y) * math.sin(a) + SONAR_AHEAD_M)
+        if seen:
+            if self.seen_travel == 0.0:
+                self.seen_first = wall
+            self.seen_travel += step
+        else:
+            self.seen_travel = 0.0
+        confirmed = self.seen_travel >= CORNER_CONFIRM_M
+
+        if confirmed and turned < 5.0:
+            self.mode = "TRACK"           # same wall: it was only a dropout
+            self.lost_travel = 0.0
+            self.track(wall)
+        elif confirmed and past >= CORNER_PAST_M:
+            self.mode = "TRACK"
+            self.track_dist = 0.0
+            self.lost_travel = 0.0
+            # Driving straight, the reading shrinks if the robot is angled
+            # toward the new wall and grows if angled away: that slope
+            # gives the starting angle estimate.
+            slope = (wall - self.seen_first) / self.seen_travel
+            phi = clamp(math.atan(-slope), -0.5, 0.5)
+            self.reset_wall_estimate(wall, phi)
+            if DEBUG:
+                print("WALL FOUND {:.2f} after {:.0f} deg, angle {:.0f}"
+                      .format(wall, turned, math.degrees(phi)))
+            self.track(wall)
+        elif past >= CORNER_PAST_M + 0.01 and not seen:
+            if turned >= CORNER_MAX_TURN_DEG:
+                self.say("WALL LOST")
+                self.begin_peel()         # nothing to follow: try to go home
+            else:
+                # Next multiple of the step, so small overshoots do not add up.
+                self.corner_pivoting = True
+                self.pivot_target = CORNER_STEP_DEG * (
+                    int((turned + 5.0) / CORNER_STEP_DEG) + 1)
+        else:
+            self.steer(ARC_SPEED, 0.0)
 
     def follow_step(self, wall):
         seen = wall <= LOST_DIST_M
@@ -297,62 +454,21 @@ class Robot:
             if seen:
                 self.lost_travel = 0.0
                 self.track_dist += step
+                self.last_wall = wall
                 self.track(wall)
             else:
                 self.lost_travel += step
-                if self.lost_travel < LOST_CONFIRM_M:
-                    self.steer(ARC_SPEED, 0.0)
-                elif self.track_dist >= MIN_TRACK_M and CORNER_SHIFT_M > 0:
-                    self.mode = "ADVANCE"
-                    self.shift_dist = 0.0
-                    if DEBUG:
-                        print("ADVANCE")
-                elif self.track_dist >= MIN_TRACK_M and CORNER_SHIFT_M < 0:
-                    self.mode = "REVERSE"
-                    self.shift_dist = 0.0
-                    if DEBUG:
-                        print("REVERSE")
+                angled = abs(self.wall_phi) > math.radians(COAST_ANGLE_DEG)
+                if angled and self.lost_travel < COAST_MAX_M:
+                    # Probably blinded by the angle to the wall, not a
+                    # corner: steer back to parallel on the estimate alone.
+                    self.track(None)
+                elif self.lost_travel < LOST_CONFIRM_M:
+                    self.track(None)
                 else:
-                    self.start_arc()
-
-        elif self.mode == "ADVANCE":
-            self.shift_dist += step
-            if seen:
-                self.mode = "TRACK"       # it was only a dropout
-            elif self.shift_dist >= CORNER_SHIFT_M:
-                self.start_arc()
-            else:
-                self.steer(ARC_SPEED, 0.0)
-
-        elif self.mode == "REVERSE":
-            # The sonar sees the old wall again while backing up: ignore it.
-            self.shift_dist += step
-            if self.shift_dist >= -CORNER_SHIFT_M:
-                self.stop()
-                self.start_arc()
-            else:
-                self.left_motor.run(-REVERSE_SPEED)
-                self.right_motor.run(-REVERSE_SPEED)
-
-        else:  # ARC
-            turned = self.arc_start_heading - self.heading_cw
-            if seen and turned >= ARC_BLIND_DEG:
-                self.mode = "TRACK"
-                self.track_dist = 0.0
-                self.lost_travel = 0.0
-                # The sonar first catches the new wall while the robot is
-                # still angled away from it.
-                self.reset_wall_estimate(
-                    wall, -math.radians(ACQUIRE_ANGLE_DEG))
-                if DEBUG:
-                    print("WALL FOUND {:.2f}".format(wall))
-                self.track(wall)
-            elif turned >= ARC_MAX_TURN_DEG:
-                self.say("WALL LOST")
-                self.begin_peel()         # nothing to follow: try to go home
-            else:
-                turn = ARC_SPEED * WHEEL_BASE_M / (2.0 * ARC_RADIUS_M)
-                self.steer(ARC_SPEED, -turn)
+                    self.start_corner()
+        else:
+            self.corner_step(wall, seen, step)
 
     def loop_complete(self):
         net_left = self.first_follow_heading - self.heading_cw
@@ -402,6 +518,7 @@ class Robot:
             now = self.clock.time()
             if now > TIME_LIMIT_MS:
                 self.say("TIME UP")
+                self.outcome = "time up"
                 break
 
             self.update_odometry()
@@ -516,8 +633,8 @@ class Robot:
                 passed = self.return_min_d < 0.30 and d > self.return_min_d + 0.01
                 if d <= MEASURE_AHEAD_M + 0.005 or passed:
                     self.stop()
-                    self.ev3.speaker.beep()
                     self.say("AT START")
+                    self.outcome = "home"
                     break
                 err = self.bearing_error_to(star_x, star_y)
                 if abs(err) > 40.0:
@@ -536,6 +653,7 @@ class Robot:
                     self.steer(speed, turn)
 
         self.stop()
+        self.finale()
 
 
 def main():
@@ -548,3 +666,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ 
