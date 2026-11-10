@@ -69,8 +69,8 @@ FOLLOW_SPEED = 220.0        # wheel deg/s (about 12 cm/s)
 # in simulation is FOLLOW_SPEED 270, ARC_SPEED 220, CORNER_TURN_SPEED 140.
 ARC_SPEED = 180.0           # wheel deg/s during corner probes and the exit arc
 K_ANGLE = 2.4               # how hard to correct the angle to the wall (1/s)
-K_DIST = 7.0                # approach angle (rad) per meter of distance error
-MAX_APPROACH_DEG = 15.0     # never angle in/out more steeply than this
+K_DIST = 4.0                # approach angle (rad) per meter of distance error
+MAX_APPROACH_DEG = 10.0     # never angle in/out more steeply than this
                             # (the sonar goes blind at steep angles)
 COAST_ANGLE_DEG = 12.0      # wall lost while angled more than this: assume
                             # the angle blinded the sonar, not a corner
@@ -94,6 +94,8 @@ REVERSE_SPEED = 150.0
 TURN_SPEED = 200.0
 RETURN_SPEED = 220.0
 BACKUP_DIST_M = 0.08
+PEEL_TURN_DEG = 35.0        # arc this far right, away from the wall, then
+                            # pivot in place to face the start
 BUMP_TURN_DEG = 90.0        # right turn after a head-on bumper hit
 GLANCE_TURN_DEG = 35.0      # smaller right turn after scraping the side wall
 GLANCE_DIST_M = 0.075       # sonar closer than this at a bump = scraping
@@ -190,6 +192,7 @@ class Robot:
         self.stuck_start_ms = 0
         self.stuck_travel = 0.0
         self.return_min_d = 99.0
+        self.peel_start_heading = 0.0
         self.debug_counter = 0
         self.outcome = "gave up"     # becomes "home" or "time up"
 
@@ -310,6 +313,7 @@ class Robot:
         self.say("FOLLOW")
 
     def begin_peel(self):
+        self.peel_start_heading = self.heading_cw
         self.set_state("PEEL")
         self.say("PEEL")
 
@@ -605,15 +609,18 @@ class Robot:
                                   - self.heading_cw))
 
             elif self.state == "PEEL":
-                # Arc forward and RIGHT (away from the wall) until the robot
-                # faces the start. No pivot next to the wall.
+                # Arc forward and RIGHT a little to get clear of the wall;
+                # RETURN then pivots in place to face the start.
                 err = self.bearing_error_to(star_x, star_y)
                 stuck = self.is_stuck(now)
                 if bumped or stuck:
                     # Something is in the way: back off, then pivot to face
                     # the start and go.
                     self.begin_backup(0.0, "RETURN")
-                elif abs(err) <= 25.0 or now - self.state_start_ms > 12000:
+                elif (abs(err) <= 25.0
+                      or self.heading_cw - self.peel_start_heading
+                      >= PEEL_TURN_DEG
+                      or now - self.state_start_ms > 12000):
                     self.return_min_d = 99.0
                     self.set_state("RETURN")
                     self.say("RETURN")
@@ -666,4 +673,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- 
