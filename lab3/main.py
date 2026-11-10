@@ -212,6 +212,8 @@ class Robot:
         self.stuck_travel = 0.0
         self.return_min_d = 99.0
         self.peel_start_heading = 0.0
+        self.approach_len = 0.0       # start-to-obstacle distance driven
+        self.return_travel = 0.0      # driven since leaving the wall
         self.debug_counter = 0
         self.outcome = "gave up"     # becomes "home" or "time up"
         self.homing = False           # following a wall to get around it
@@ -348,6 +350,7 @@ class Robot:
 
     def begin_peel(self):
         self.peel_start_heading = self.heading_cw
+        self.return_travel = 0.0
         self.set_state("PEEL")
         self.say("PEEL")
 
@@ -648,6 +651,7 @@ class Robot:
                     self.stop()
                     self.ev3.speaker.beep()
                     self.hit_x, self.hit_y = self.x, self.y
+                    self.approach_len = self.dist_to(0.0, 0.0)
                     a = -math.radians(self.heading_cw)
                     self.tip_x = self.x + MEASURE_AHEAD_M * math.cos(a)
                     self.tip_y = self.y + MEASURE_AHEAD_M * math.sin(a)
@@ -805,7 +809,12 @@ class Robot:
                         self.return_min_d = d
                     passed = (self.return_min_d < 0.30
                               and d > self.return_min_d + 0.02)
-                    if d <= 0.015 or passed:
+                    # Safety cap: home can never be farther from the wall
+                    # than the original approach, so never drive farther
+                    # than that (keeps the robot inside the workspace).
+                    self.return_travel += abs(self.d_center)
+                    too_far = self.return_travel >= self.approach_len + 0.05
+                    if d <= 0.015 or passed or too_far:
                         self.stop()
                         self.set_state("FACE")
                         self.say("FACE")
