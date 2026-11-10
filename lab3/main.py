@@ -22,7 +22,8 @@
 #   Loop is complete when the robot has turned about a full circle to the
 #   left AND has passed its closest approach to the saved hit point.
 #   PEEL    arc right, away from the wall, until facing the start
-#   RETURN  drive to the start and stop with the measuring point on the star
+#   RETURN  drive back to where the program was started, then turn to face
+#           the original direction (measuring point back on the start)
 #
 # Creative contribution: once the robot has STOPPED, it reports how the run
 # went. Back at the start: green light, a face on the screen and a victory
@@ -46,11 +47,13 @@ import math
 #          WHEEL_BASE_M = WHEEL_BASE_M * 360 / A
 #      (short of a full turn -> make it bigger; past it -> smaller).
 #   3. Repeat until it lands on 360, then set CALIBRATE_SPIN = False.
-# USE_GYRO = True uses the gyro on S1 for heading instead; flip GYRO_SIGN
-# to -1 if a RIGHT turn makes the gyro angle go down.
+# USE_GYRO = True takes heading from the gyro on S1 instead, which does not
+# depend on wheel slip or WHEEL_BASE_M. Its direction is detected by the
+# program during the first turn; if the gyro is missing or dead the program
+# falls back to the wheel encoders. KEEP THE ROBOT STILL when the program
+# starts, or the gyro drifts.
 CALIBRATE_SPIN = False
-USE_GYRO = False
-GYRO_SIGN = 1
+USE_GYRO = True
 
 # ====================== MEASURE THESE ON YOUR ROBOT ======================
 WHEEL_RADIUS_M = 0.03175    # wheel radius
@@ -64,10 +67,10 @@ MEASURE_AHEAD_M = 0.06      # axle to measuring point (tip of the bumper)
 TARGET_DIST_M = 0.09        # desired sonar reading while following
 LOST_DIST_M = 0.30          # reading above this = wall not visible
 TOO_CLOSE_M = 0.06          # below this always steer away
-FOLLOW_SPEED = 220.0        # wheel deg/s (about 12 cm/s)
+FOLLOW_SPEED = 260.0        # wheel deg/s (about 12 cm/s)
 # If a lap is too slow for the 2-minute limit, a faster set that also worked
 # in simulation is FOLLOW_SPEED 270, ARC_SPEED 220, CORNER_TURN_SPEED 140.
-ARC_SPEED = 180.0           # wheel deg/s during corner probes and the exit arc
+ARC_SPEED = 210.0           # wheel deg/s during corner probes and the exit arc
 K_ANGLE = 2.4               # how hard to correct the angle to the wall (1/s)
 K_DIST = 4.0                # approach angle (rad) per meter of distance error
 MAX_APPROACH_DEG = 10.0     # never angle in/out more steeply than this
@@ -85,14 +88,14 @@ CORNER_STEP_DEG = 30.0      # left pivot between straight probes
 CORNER_PAST_M = 0.0         # sonar must be this far past the corner (along
                             # the current heading) before a reading counts
 CORNER_CONFIRM_M = 0.04     # ...and the wall must stay visible this far
-CORNER_TURN_SPEED = 110.0   # wheel deg/s while pivoting
+CORNER_TURN_SPEED = 160.0   # wheel deg/s while pivoting
 CORNER_MAX_TURN_DEG = 300.0 # give up if nearly a full circle finds no wall
 
 # ============================ OTHER MOTIONS ==============================
-APPROACH_SPEED = 220.0
+APPROACH_SPEED = 260.0
 REVERSE_SPEED = 150.0
 TURN_SPEED = 200.0
-RETURN_SPEED = 220.0
+RETURN_SPEED = 260.0
 BACKUP_DIST_M = 0.08
 PEEL_TURN_DEG = 35.0        # arc this far right, away from the wall, then
                             # pivot in place to face the start
@@ -105,7 +108,12 @@ TRIM = 1.5                  # small right-wheel speed correction
 
 # =========================== LOOP COMPLETION =============================
 MIN_LOOP_DIST_M = 1.20      # minimum wall-following travel
-LOOP_MIN_TURN_DEG = 250.0   # net LEFT turn required before checking hit point
+LOOP_MIN_TURN_DEG = 300.0   # net LEFT turn required before checking hit point
+LOOP_MIN_TURN_ENC_DEG = 250.0  # same, when heading comes from the encoders
+LOOP_LATERAL_M = 0.80       # allowed sideways position drift at the hit point
+RELOCALIZE = True           # correct heading/position off the first wall
+                            # when the lap closes (False = pure odometry)
+MAX_DETOURS = 4             # times to go around something blocking the way home
 LOOP_FORCE_TURN_DEG = 450.0 # odometry drifted badly: call the loop done anyway
 HIT_RADIUS_M = 0.45         # closest approach must be inside this radius
 
@@ -145,7 +153,17 @@ class Robot:
         self.right_motor = Motor(Port.D)
         self.touch = TouchSensor(Port.S3)
         self.sonar = UltrasonicSensor(Port.S4)
-        self.gyro = GyroSensor(Port.S1) if USE_GYRO else None
+        self.gyro = None
+        if USE_GYRO:
+            try:
+                self.gyro = GyroSensor(Port.S1)
+            except Exception:
+                print("NO GYRO ON S1 - using wheel encoders")
+        self.gyro_sign = 0      # 0 = gyro not trusted yet, else +1 / -1
+        self.gyro_prev = 0
+        self.gyro_turn0 = 0
+        self.enc_turn = 0.0     # total turn according to the wheel encoders
+        self.enc_turn0 = 0.0
         self.clock = StopWatch()
 
         # Pose from wheel encoders. heading_cw is continuous (not wrapped),
@@ -183,6 +201,7 @@ class Robot:
         self.corner_start_heading = 0.0
         self.corner_pivoting = False
         self.pivot_target = 0.0
+        self.pivot_start_ms = 0
         self.seen_travel = 0.0
         self.seen_first = 0.0         # first reading of a newly seen wall
         self.follow_dist = 0.0
@@ -195,6 +214,17 @@ class Robot:
         self.peel_start_heading = 0.0
         self.debug_counter = 0
         self.outcome = "gave up"     # becomes "home" or "time up"
+        self.homing = False           # following a wall to get around it
+        self.homing_start = 0.0
+        self.detours = 0
+        # Re-localisation against the first wall (see relocalize()).
+        self.tip_x = 0.0              # where the bumper touched the wall
+        self.tip_y = 0.0
+        self.on_first_wall = False
+        self.wall1_sum = 0.0          # first pass: heading when parallel
+        self.wall1_n = 0
+        self.par_avg = 0.0            # recent heading-when-parallel
+        self.par_n = 0
 
     # ------------------------------ helpers ------------------------------
 
@@ -248,10 +278,14 @@ class Robot:
         self.prev_left = l
         self.prev_right = r
         self.d_center = (d_l + d_r) / 2.0
-        if USE_GYRO:
-            self.d_heading = GYRO_SIGN * self.gyro.angle() - self.heading_cw
+        enc_d = math.degrees((d_l - d_r) / WHEEL_BASE_M)
+        self.enc_turn += enc_d
+        if self.gyro_sign != 0:
+            raw = self.gyro.angle()
+            self.d_heading = self.gyro_sign * (raw - self.gyro_prev)
+            self.gyro_prev = raw
         else:
-            self.d_heading = math.degrees((d_l - d_r) / WHEEL_BASE_M)
+            self.d_heading = enc_d
         mid = -math.radians(self.heading_cw + self.d_heading / 2.0)
         self.heading_cw += self.d_heading
         self.x += self.d_center * math.cos(mid)
@@ -369,7 +403,54 @@ class Robot:
             turn = max(turn, 0.3 * FOLLOW_SPEED)
         self.steer(FOLLOW_SPEED, turn)
 
+    def relocalize(self):
+        """The lap has closed, so the robot is beside the FIRST wall again.
+
+        Two things are known exactly there, whatever the odometry says:
+        the wall's direction (the same as on the first pass, one full turn
+        ago) and the robot's distance from it (the sonar). Use them to
+        remove heading drift and position drift across the wall before
+        driving home.
+        """
+        if not RELOCALIZE:
+            return
+        # First wall's direction: measured on the first pass if possible,
+        # otherwise the heading the robot turned to after the hit.
+        if self.wall1_n >= 10:
+            wall_heading = self.wall1_sum / self.wall1_n
+        else:
+            wall_heading = self.first_follow_heading
+        # Robot's heading-when-parallel and wall distance right now.
+        if self.mode == "TRACK" and self.par_n >= 8:
+            parallel_now = self.par_avg
+            wall_dist = self.wall_d
+        else:
+            parallel_now = self.heading_cw
+            wall_dist = AXLE_TARGET_M
+        heading_error = parallel_now - (wall_heading - 360.0)
+        a = -math.radians(wall_heading)
+        away_x, away_y = math.sin(a), -math.cos(a)    # pointing off the wall
+        drift = ((self.x - self.tip_x) * away_x
+                 + (self.y - self.tip_y) * away_y - wall_dist)
+        print("RELOCALIZE heading_error={:.1f} drift={:.2f}".format(
+            heading_error, drift))
+        # The wall direction and the sonar distance are measurements, so
+        # trust them completely, however far the odometry has drifted.
+        if abs(heading_error) <= 40.0:
+            self.heading_cw -= heading_error
+        self.x -= drift * away_x
+        self.y -= drift * away_y
+        # Along the wall the robot is known to be just past the hit point.
+        along_x, along_y = math.cos(a), math.sin(a)
+        along = ((self.x - self.tip_x) * along_x
+                 + (self.y - self.tip_y) * along_y)
+        wanted = clamp(along, 0.0, 0.20)
+        self.x += (wanted - along) * along_x
+        self.y += (wanted - along) * along_y
+
     def start_corner(self):
+        self.on_first_wall = False
+        self.par_n = 0
         """The wall just ended. Work out where its end (the corner) is."""
         a = -math.radians(self.heading_cw)
         ahead_x, ahead_y = math.cos(a), math.sin(a)       # robot's forward
@@ -395,14 +476,15 @@ class Robot:
 
         if self.corner_pivoting:
             remaining = self.pivot_target - turned
-            if remaining <= 1.5:
+            if (remaining <= 2.0
+                    or self.clock.time() - self.pivot_start_ms > 2500):
                 self.corner_pivoting = False
                 self.seen_travel = 0.0
                 self.stop()
             else:
-                speed = clamp(remaining * 6.0, 40.0, CORNER_TURN_SPEED)
-                self.left_motor.run(-speed)
-                self.right_motor.run(speed)
+                # Constant firm speed: slow pivots stall on carpet.
+                self.left_motor.run(-CORNER_TURN_SPEED)
+                self.right_motor.run(CORNER_TURN_SPEED)
             return
 
         # Straight probe. How far is the SONAR past the corner, measured
@@ -445,6 +527,7 @@ class Robot:
             else:
                 # Next multiple of the step, so small overshoots do not add up.
                 self.corner_pivoting = True
+                self.pivot_start_ms = self.clock.time()
                 self.pivot_target = CORNER_STEP_DEG * (
                     int((turned + 5.0) / CORNER_STEP_DEG) + 1)
         else:
@@ -460,6 +543,16 @@ class Robot:
                 self.track_dist += step
                 self.last_wall = wall
                 self.track(wall)
+                # Heading the robot would have if exactly parallel to the wall.
+                parallel = self.heading_cw + math.degrees(self.wall_phi)
+                self.par_n += 1
+                if self.par_n == 1:
+                    self.par_avg = parallel
+                else:
+                    self.par_avg += 0.08 * (parallel - self.par_avg)
+                if self.on_first_wall and 0.08 <= self.track_dist <= 0.30:
+                    self.wall1_sum += parallel
+                    self.wall1_n += 1
             else:
                 self.lost_travel += step
                 angled = abs(self.wall_phi) > math.radians(COAST_ANGLE_DEG)
@@ -476,15 +569,28 @@ class Robot:
 
     def loop_complete(self):
         net_left = self.first_follow_heading - self.heading_cw
-        if self.follow_dist < MIN_LOOP_DIST_M or net_left < LOOP_MIN_TURN_DEG:
+        min_turn = (LOOP_MIN_TURN_DEG if self.gyro_sign != 0
+                    else LOOP_MIN_TURN_ENC_DEG)
+        if self.follow_dist < MIN_LOOP_DIST_M or net_left < min_turn:
             return False
         if net_left >= LOOP_FORCE_TURN_DEG:
             return True
+        # 1) Passed the closest approach to the hit point.
         d = self.dist_to(self.hit_x, self.hit_y)
         if d < self.loop_min_d:
             self.loop_min_d = d
-        # Done once we have passed the closest approach to the hit point.
-        return self.loop_min_d <= HIT_RADIUS_M and d >= self.loop_min_d + 0.03
+        if self.loop_min_d <= HIT_RADIUS_M and d >= self.loop_min_d + 0.03:
+            return True
+        # 2) Back on the first wall (almost a full turn made) and level
+        #    with the hit point along it, even if position drifted sideways.
+        if self.gyro_sign == 0:
+            return False
+        a = -math.radians(self.first_follow_heading)
+        dx = self.x - self.hit_x
+        dy = self.y - self.hit_y
+        along = dx * math.cos(a) + dy * math.sin(a)
+        lateral = -dx * math.sin(a) + dy * math.cos(a)
+        return along >= 0.0 and abs(lateral) <= LOOP_LATERAL_M
 
     # ------------------------------ main loop ----------------------------
 
@@ -497,7 +603,7 @@ class Robot:
 
         self.prev_left = self.left_motor.angle()
         self.prev_right = self.right_motor.angle()
-        if USE_GYRO:
+        if self.gyro is not None:
             self.gyro.reset_angle(0)
         self.clock.reset()
 
@@ -514,7 +620,10 @@ class Robot:
             wait(5000)
             return
 
-        star_x, star_y = MEASURE_AHEAD_M, 0.0   # where the star is
+        # Home = where the wheel axle was when the button was pressed.
+        # Driving the axle back there and then facing the original way
+        # puts the measuring point back on the start point.
+        star_x, star_y = 0.0, 0.0
         self.set_state("DRIVE")
 
         while self.state != "DONE":
@@ -539,6 +648,10 @@ class Robot:
                     self.stop()
                     self.ev3.speaker.beep()
                     self.hit_x, self.hit_y = self.x, self.y
+                    a = -math.radians(self.heading_cw)
+                    self.tip_x = self.x + MEASURE_AHEAD_M * math.cos(a)
+                    self.tip_y = self.y + MEASURE_AHEAD_M * math.sin(a)
+                    self.on_first_wall = True
                     self.say("HIT")
                     self.begin_backup(BUMP_TURN_DEG, "FOLLOW")
 
@@ -549,9 +662,28 @@ class Robot:
                         or now - self.state_start_ms > 3000):
                     self.stop()
                     self.turn_target = self.heading_cw + self.bump_turn
+                    self.enc_turn0 = self.enc_turn
+                    if self.gyro is not None:
+                        self.gyro_turn0 = self.gyro.angle()
                     self.set_state("TURN")
 
             elif self.state == "TURN":
+                if self.gyro is not None and self.gyro_sign == 0:
+                    # Compare gyro and encoders over the first big turn to
+                    # learn which way the gyro counts, then switch to it.
+                    enc = self.enc_turn - self.enc_turn0
+                    if abs(enc) >= 45.0:
+                        raw = self.gyro.angle()
+                        gyro = raw - self.gyro_turn0
+                        if abs(gyro) >= 20.0:
+                            self.gyro_sign = 1 if gyro * enc > 0 else -1
+                            self.gyro_prev = raw
+                            self.heading_cw += self.gyro_sign * gyro - enc
+                            print("GYRO OK sign={} gyro={} enc={:.0f}".format(
+                                self.gyro_sign, gyro, enc))
+                        else:
+                            self.gyro = None
+                            print("GYRO NOT RESPONDING - using encoders")
                 remaining = self.turn_target - self.heading_cw
                 if (abs(remaining) <= 2.0
                         or now - self.state_start_ms > 6000):
@@ -564,7 +696,7 @@ class Robot:
                         self.set_state("RETURN")
                         self.say("RETURN")
                 else:
-                    speed = clamp(abs(remaining) * 5.0, 40.0, TURN_SPEED)
+                    speed = clamp(abs(remaining) * 5.0, 70.0, TURN_SPEED)
                     if remaining > 0:
                         self.left_motor.run(speed)
                         self.right_motor.run(-speed)
@@ -580,6 +712,8 @@ class Robot:
                     # Scraping the wall we are following needs only a small
                     # turn away; a wall straight ahead needs the full 90.
                     glancing = self.mode == "TRACK" and wall <= GLANCE_DIST_M
+                    self.on_first_wall = False
+                    self.par_n = 0
                     if DEBUG:
                         print("BUMP wall={:.2f} glancing={}".format(
                             wall, glancing))
@@ -591,10 +725,21 @@ class Robot:
                 if self.state != "FOLLOW":
                     continue
 
+                if self.homing:
+                    # Going around something that blocked the way home:
+                    # leave the wall once the start is off to the right.
+                    err = self.bearing_error_to(star_x, star_y)
+                    if (self.follow_dist - self.homing_start >= 0.25
+                            and 20.0 <= err <= 160.0):
+                        self.homing = False
+                        self.begin_peel()
+                    continue
+
                 if self.loop_complete():
                     self.stop()
+                    self.relocalize()
                     self.ev3.speaker.beep()
-                    self.say("BACK AT HIT")
+                    self.say("HIT POINT FOUND")
                     self.begin_peel()
                     continue
 
@@ -629,35 +774,62 @@ class Robot:
                                ARC_SPEED * WHEEL_BASE_M / (2.0 * 0.20))
 
             elif self.state == "RETURN":
-                if bumped:
-                    self.say("RETURN BLOCKED")
-                    break
-                # Stop when the MEASURING POINT (front of robot) is on the
-                # star, i.e. the axle is MEASURE_AHEAD_M short of it.
+                stuck = self.is_stuck(now)
+                if bumped or stuck:
+                    # Something is between the robot and the start: follow
+                    # its wall for a while, then head home again.
+                    self.detours += 1
+                    if self.detours > MAX_DETOURS:
+                        self.say("RETURN BLOCKED")
+                        break
+                    self.say("DETOUR")
+                    self.homing = True
+                    self.homing_start = self.follow_dist
+                    self.begin_backup(BUMP_TURN_DEG, "FOLLOW")
+                    continue
                 d = self.dist_to(star_x, star_y)
-                if d < self.return_min_d:
-                    self.return_min_d = d
-                passed = self.return_min_d < 0.30 and d > self.return_min_d + 0.01
-                if d <= MEASURE_AHEAD_M + 0.005 or passed:
-                    self.stop()
-                    self.say("AT START")
-                    self.outcome = "home"
-                    break
                 err = self.bearing_error_to(star_x, star_y)
-                if abs(err) > 40.0:
-                    # Facing well away from the start: pivot first.
-                    speed = clamp(abs(err) * 4.0, 60.0, TURN_SPEED)
+                if abs(err) > 40.0 and d > 0.06:
+                    # Facing well away from home: pivot first. (Distance
+                    # is not judged while pivoting.)
+                    speed = clamp(abs(err) * 4.0, 80.0, TURN_SPEED)
                     if err > 0:
                         self.left_motor.run(speed)
                         self.right_motor.run(-speed)
                     else:
                         self.left_motor.run(-speed)
                         self.right_motor.run(speed)
+                    self.return_min_d = 99.0
                 else:
-                    speed = clamp((d - MEASURE_AHEAD_M) * 600.0, 70.0,
-                                  RETURN_SPEED)
-                    turn = clamp(2.5 * err, -0.4 * speed, 0.4 * speed)
-                    self.steer(speed, turn)
+                    if d < self.return_min_d:
+                        self.return_min_d = d
+                    passed = (self.return_min_d < 0.30
+                              and d > self.return_min_d + 0.02)
+                    if d <= 0.015 or passed:
+                        self.stop()
+                        self.set_state("FACE")
+                        self.say("FACE")
+                    else:
+                        speed = clamp(d * 600.0, 70.0, RETURN_SPEED)
+                        turn = clamp(2.5 * err, -0.4 * speed, 0.4 * speed)
+                        self.steer(speed, turn)
+
+            elif self.state == "FACE":
+                # At home: turn to face the way the robot started.
+                remaining = wrap_degrees(-self.heading_cw)
+                if (abs(remaining) <= 3.0
+                        or now - self.state_start_ms > 6000):
+                    self.stop()
+                    self.say("AT START")
+                    self.outcome = "home"
+                    break
+                speed = clamp(abs(remaining) * 4.0, 80.0, TURN_SPEED)
+                if remaining > 0:
+                    self.left_motor.run(speed)
+                    self.right_motor.run(-speed)
+                else:
+                    self.left_motor.run(-speed)
+                    self.right_motor.run(speed)
 
         self.stop()
         self.finale()
