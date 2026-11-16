@@ -1,6 +1,7 @@
 #!/usr/bin/env pybricks-micropython
 # COMP 581 Lab 4: Bug Race
 # Caitlin Estrada (730661469) and Madeline Clark (730650946)
+# Team number: __
 #
 # Strategy (a "Bug" algorithm built on our Lab 3 wall follower)
 #   The robot keeps track of where it is (x, y in the lab's coordinates)
@@ -51,7 +52,9 @@ GOAL_Y_M = 2.50
 # Reaching the goal depends on measuring distance and heading correctly.
 # DISTANCE: set CALIBRATE_STRAIGHT = True and run. The robot drives what it
 #   believes is exactly 1.000 m. Measure what it really drove (D meters) and
-#   set  WHEEL_RADIUS_M = WHEEL_RADIUS_M * D.  Repeat until it drives 1.00 m.
+#   set  DISTANCE_SCALE = DISTANCE_SCALE * D.  Repeat until it drives 1.00 m.
+#   (Wheels sink into carpet and slip a little, so the distance covered per
+#   wheel turn is less than the wheel's measured size suggests.)
 # HEADING comes from the gyro on S1 (USE_GYRO = True). Its direction is
 #   detected by the program during the first turn; if the gyro is missing or
 #   dead the program falls back to the wheel encoders. START THE PROGRAM WITH
@@ -63,6 +66,8 @@ GOAL_Y_M = 2.50
 CALIBRATE_STRAIGHT = True
 CALIBRATE_SPIN = False
 USE_GYRO = True
+DISTANCE_SCALE = 0.85       # real distance / distance from wheel size alone
+                            # (measured: drove 0.85 m when it believed 1.00 m)
 
 # ====================== MEASURE THESE ON YOUR ROBOT ======================
 WHEEL_RADIUS_M = 0.03175    # wheel radius
@@ -311,8 +316,10 @@ class Robot:
     def update_odometry(self):
         l = self.left_motor.angle()
         r = self.right_motor.angle()
-        d_l = math.radians(l - self.prev_left) * WHEEL_RADIUS_M
-        d_r = math.radians(r - self.prev_right) * WHEEL_RADIUS_M
+        d_l = (math.radians(l - self.prev_left) * WHEEL_RADIUS_M
+               * DISTANCE_SCALE)
+        d_r = (math.radians(r - self.prev_right) * WHEEL_RADIUS_M
+               * DISTANCE_SCALE)
         self.prev_left = l
         self.prev_right = r
         self.d_center = (d_l + d_r) / 2.0
