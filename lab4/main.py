@@ -60,7 +60,7 @@ GOAL_Y_M = 2.50
 # Encoder fallback only: CALIBRATE_SPIN = True spins what the robot believes
 #   is 360 deg right; if it really turned A deg, set
 #   WHEEL_BASE_M = WHEEL_BASE_M * 360 / A.
-CALIBRATE_STRAIGHT = False
+CALIBRATE_STRAIGHT = True
 CALIBRATE_SPIN = False
 USE_GYRO = True
 
