@@ -117,19 +117,24 @@ UNJAM_FORWARD_M = 0.10      # drive straight this far to get clear
 GLANCE_TURN_DEG = 35.0      # smaller right turn after scraping the side wall
 GLANCE_DIST_M = 0.075       # sonar closer than this at a bump = scraping
 STUCK_MS = 1200             # no movement for this long counts as a bump
+YAW_HIT_DEG = 12.0          # driving at the goal: gyro and wheels disagree
+                            # about turning by this much = the robot is
+                            # being pushed round by an obstacle (0 = off)
+YAW_HIT_FOLLOW_DEG = 20.0   # same check while wall following (0 = off)
 TRIM = 1.5                  # small right-wheel speed correction
 
 # ============================ BUG ALGORITHM ==============================
 GOAL_TOL_M = 0.02           # stop when the measuring point is this close
 GOAL_BUMP_OK_M = 0.20       # bumped this close to the goal: stop there
 GOAL_FOLLOW_OK_M = 0.08     # wall following passes this close: stop there
-FINAL_RADIUS_M = 0.25       # wall following passes the goal this close:
-                            # turn and drive straight to it
+FINAL_RADIUS_M = 0.35       # wall following passes the goal this close:
+                            # turn, drive straight to it, and stop there
+                            # even if this wall is in the way
 LEAVE_MARGIN_M = 0.05       # must be this much closer than at the hit point
 LEAVE_MIN_DEG = 5.0         # goal must be between these angles to the
 LEAVE_MAX_DEG = 175.0       # robot's RIGHT before it leaves the wall
 MIN_FOLLOW_M = 0.15         # follow at least this far before leaving
-FULL_LOOP_DEG = 400.0       # turned this far left on one obstacle = went
+FULL_LOOP_DEG = 370.0       # turned this far left on one obstacle = went
                             # all the way round without being able to leave
 
 TIME_LIMIT_MS = 170000      # stop by itself before the 3-minute limit
@@ -179,6 +184,7 @@ class Robot:
         self.gyro_turn0 = 0
         self.enc_turn = 0.0     # total turn according to the wheel encoders
         self.enc_turn0 = 0.0
+        self.yaw_gap = 0.0      # recent gyro turn minus wheel-encoder turn
         self.clock = StopWatch()
 
         # Pose in lab coordinates: (x, y) of the middle of the wheel axle.
@@ -242,6 +248,7 @@ class Robot:
         self.episode_heading = 0.0    # heading when this obstacle was met
         self.episode_min_tip = 99.0   # closest the tip got to the goal
         self.go_min_tip = 99.0
+        self.final = False            # on the last short drive to the goal
 
         self.stuck_start_ms = 0
         self.stuck_travel = 0.0
@@ -315,6 +322,9 @@ class Robot:
             raw = self.gyro.angle()
             self.d_heading = self.gyro_sign * (raw - self.gyro_prev)
             self.gyro_prev = raw
+            # Leaky sum (about the last second) of how much more the robot
+            # really turned than its wheels say it should have.
+            self.yaw_gap = 0.97 * self.yaw_gap + (self.d_heading - enc_d)
         else:
             self.d_heading = enc_d
         mid = math.radians(START_THETA_DEG - self.heading_cw
@@ -352,6 +362,7 @@ class Robot:
         self.state_start_ms = self.clock.time()
         self.stuck_start_ms = self.state_start_ms
         self.stuck_travel = 0.0
+        self.yaw_gap = 0.0
 
     def is_stuck(self, now):
         """True if the wheels have barely moved for STUCK_MS."""
@@ -539,6 +550,7 @@ class Robot:
             else:
                 # Constant firm speed: slow pivots stall on carpet.
                 self.pivot(CORNER_TURN_SPEED, False)
+            self.yaw_gap = 0.0            # wheels slip in pivots: not a hit
             return
 
         # Straight probe. How far is the SONAR past the corner, measured
@@ -706,12 +718,19 @@ class Robot:
                 # The bumper is narrow: an angled wall can stop the robot
                 # without pressing it, so a stall also counts as a hit.
                 stuck = self.is_stuck(now)
+                if (YAW_HIT_DEG > 0 and abs(self.yaw_gap) >= YAW_HIT_DEG
+                        and now - self.state_start_ms > 500):
+                    # Wheels say "straight" but the gyro says the robot is
+                    # being turned: one side is caught on an obstacle.
+                    if DEBUG:
+                        print("YAW HIT gap={:.0f}".format(self.yaw_gap))
+                    stuck = True
                 if tip_d < self.go_min_tip:
                     self.go_min_tip = tip_d
                 passed = (self.go_min_tip < 0.20
                           and tip_d > self.go_min_tip + 0.015)
                 if bumped or stuck:
-                    if tip_d <= GOAL_BUMP_OK_M:
+                    if tip_d <= GOAL_BUMP_OK_M or self.final:
                         self.outcome = "goal"
                         break
                     # Hit point: remember how far the goal was from here.
@@ -853,11 +872,19 @@ class Robot:
                         and tip_d > self.episode_min_tip + 0.01
                         and not self.corner_pivoting):
                     # Just passed the goal while following: go straight to it.
-                    print("FINAL at x={:.2f} y={:.2f}".format(self.x, self.y))
+                    print("FINAL at x={:.2f} y={:.2f} tip={:.2f}".format(
+                        self.x, self.y, tip_d))
+                    self.final = True
                     self.begin_go()
                     continue
 
                 stuck = self.is_stuck(now)
+                if (YAW_HIT_FOLLOW_DEG > 0
+                        and abs(self.yaw_gap) >= YAW_HIT_FOLLOW_DEG
+                        and now - self.state_start_ms > 500):
+                    if DEBUG:
+                        print("YAW HIT gap={:.0f}".format(self.yaw_gap))
+                    stuck = True
                 if bumped or stuck:
                     # Scraping the wall we are following needs only a small
                     # turn away; a wall straight ahead needs the full 90.
