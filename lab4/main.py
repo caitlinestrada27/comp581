@@ -1,7 +1,6 @@
 #!/usr/bin/env pybricks-micropython
 # COMP 581 Lab 4: Bug Race
 # Caitlin Estrada (730661469) and Madeline Clark (730650946)
-# Team number: __
 #
 # Strategy (a "Bug" algorithm built on our Lab 3 wall follower)
 #   The robot keeps track of where it is (x, y in the lab's coordinates)
@@ -143,6 +142,8 @@ FULL_LOOP_DEG = 370.0       # turned this far left on one obstacle = went
                             # all the way round without being able to leave
 
 TIME_LIMIT_MS = 170000      # stop by itself before the 3-minute limit
+RESULT_HOLD_MS = 600000     # keep the result on the screen this long
+                            # (10 minutes) or until CENTER is pressed
 
 # ================================ FINALE =================================
 # (frequency in Hz, length in ms); frequency 0 is a rest.
@@ -248,7 +249,8 @@ class Robot:
         # Bug algorithm
         self.hit_d = 99.0             # distance to the goal at the hit point
         self.new_hit = False
-        self.hits = 0
+        self.hits = 0                 # obstacles met on the way to the goal
+        self.bumps = 0                # other bumps and stalls while following
         self.episode_travel = 0.0     # wall following since the hit point
         self.episode_heading = 0.0    # heading when this obstacle was met
         self.episode_min_tip = 99.0   # closest the tip got to the goal
@@ -280,29 +282,48 @@ class Robot:
             self.right_motor.run(speed)
 
     def finale(self):
-        """Stop, beep, and show how the run ended."""
+        """Stop, beep, and show where the robot thinks it is.
+
+        The numbers stay on the screen until CENTER is pressed (or for
+        RESULT_HOLD_MS), so they can be written down and compared with a
+        tape measure. All positions are in meters in the lab's coordinates.
+        """
+        seconds = self.clock.time() / 1000.0
         self.ev3.speaker.beep()
         if self.outcome == "goal":
             self.ev3.light.on(Color.GREEN)
-            self.ev3.screen.clear()
-            self.ev3.screen.print("  ^   ^")
-            self.ev3.screen.print("  \\___/")
-            self.ev3.screen.print("GOAL!")
             tune = VICTORY_TUNE
         else:
             self.ev3.light.on(Color.RED)
-            self.ev3.screen.clear()
-            self.ev3.screen.print("  -   -")
-            self.ev3.screen.print("  /```\\")
-            self.ev3.screen.print(self.outcome)
             tune = SAD_TUNE
-        self.ev3.screen.print("x={:.2f} y={:.2f}".format(self.x, self.y))
+        a = self.theta()
+        tip_x = self.x + MEASURE_AHEAD_M * math.cos(a)
+        tip_y = self.y + MEASURE_AHEAD_M * math.sin(a)
+        facing = wrap_degrees(math.degrees(a))
+        lines = [
+            self.outcome.upper(),
+            "TIP  x={:.2f} y={:.2f}".format(tip_x, tip_y),
+            "axle x={:.2f} y={:.2f}".format(self.x, self.y),
+            "facing {:.0f} deg".format(facing),
+            "hits {} bumps {}".format(self.hits, self.bumps),
+            "time {:.0f} s".format(seconds),
+            "CENTER = exit",
+        ]
+        self.ev3.screen.clear()
+        for line in lines:
+            self.ev3.screen.print(line)
+            print(line)
         for frequency, duration in tune:
             if frequency > 0:
                 self.ev3.speaker.beep(frequency, duration)
             else:
                 wait(duration)
             wait(30)
+        # Keep the result on the screen.
+        hold = StopWatch()
+        while (hold.time() < RESULT_HOLD_MS
+               and Button.CENTER not in self.ev3.buttons.pressed()):
+            wait(50)
 
     def say(self, message):
         self.ev3.screen.clear()
@@ -896,6 +917,7 @@ class Robot:
                     # Scraping the wall we are following needs only a small
                     # turn away; a wall straight ahead needs the full 90.
                     glancing = self.mode == "TRACK" and wall <= GLANCE_DIST_M
+                    self.bumps += 1
                     if DEBUG:
                         print("BUMP wall={:.2f} glancing={}".format(
                             wall, glancing))
