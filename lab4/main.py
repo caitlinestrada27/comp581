@@ -51,7 +51,7 @@ GOAL_Y_M = 2.50
 # So it aims at a point shifted the other way: left and further forward.
 # To set from measurements: AIM_SHIFT = goal - where it really stopped,
 # averaged over a few runs. Set both to 0.0 to aim at the goal exactly.
-AIM_SHIFT_X_M = -0.15
+AIM_SHIFT_X_M = -0.08        # was -0.15: one-obstacle run then stopped 32 cm left
 AIM_SHIFT_Y_M = 0.15
 AIM_X_M = GOAL_X_M + AIM_SHIFT_X_M     # the point the robot drives to
 AIM_Y_M = GOAL_Y_M + AIM_SHIFT_Y_M
