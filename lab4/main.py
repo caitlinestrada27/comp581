@@ -1,6 +1,7 @@
 #!/usr/bin/env pybricks-micropython
 # COMP 581 Lab 4: Bug Race
 # Caitlin Estrada (730661469) and Madeline Clark (730650946)
+# Team number: __
 #
 # Strategy (a "Bug" algorithm built on our Lab 3 wall follower)
 #   The robot keeps track of where it is (x, y in the lab's coordinates)
@@ -146,7 +147,7 @@ LOST_CONFIRM_M = 0.02       # travel with no wall before reacting
 
 # ========================= OUTSIDE CORNER SEARCH =========================
 CORNER_STEP_DEG = 30.0      # left pivot between straight probes
-CORNER_PAST_M = 0.0         # sonar must be this far past the corner (along
+CORNER_PAST_M = -0.03       # sonar must be this far past the corner (along
                             # the current heading) before a reading counts
 CORNER_CONFIRM_M = 0.04     # ...and the wall must stay visible this far
 CORNER_MAX_TURN_DEG = 300.0 # give up if nearly a full circle finds no wall
@@ -164,6 +165,8 @@ TURN_JAM_MS = 800           # no rotation for this long = pivot is jammed
 UNJAM_TURN_DEG = 10.0       # jammed pivot: turn back this far, then
 UNJAM_FORWARD_M = 0.10      # drive straight this far to get clear
 GLANCE_TURN_DEG = 35.0      # smaller right turn after scraping the side wall
+GLANCE_RESET_M = 0.15       # scrapes in a row with less tracking than this
+                            # between them turn further each time (35, 60, 90)
 GLANCE_DIST_M = 0.075       # sonar closer than this at a bump = scraping
 STUCK_MS = 1200             # no movement for this long counts as a bump
 YAW_HIT_DEG = 12.0          # driving at the goal: gyro and wheels disagree
@@ -302,6 +305,8 @@ class Robot:
         self.new_hit = False
         self.hits = 0                 # obstacles met on the way to the goal
         self.bumps = 0                # other bumps and stalls while following
+        self.glance_run = 0           # scrapes in a row without progress
+        self.glance_track = 0.0       # wall tracked since the last scrape
         self.episode_travel = 0.0     # wall following since the hit point
         self.episode_heading = 0.0    # heading when this obstacle was met
         self.episode_min_tip = 99.0   # closest the tip got to the goal
@@ -698,6 +703,7 @@ class Robot:
             if seen:
                 self.lost_travel = 0.0
                 self.track_dist += step
+                self.glance_track += step
                 self.last_wall = wall
                 self.track(wall)
             else:
@@ -1000,12 +1006,20 @@ class Robot:
                         (hit_left and not hit_right)
                         or (not bumped and wall <= GLANCE_DIST_M))
                     self.bumps += 1
+                    turn = BUMP_TURN_DEG
+                    if glancing:
+                        # Repeated scrapes at the same spot (e.g. a sharp
+                        # point): turn further away each time.
+                        if self.glance_track >= GLANCE_RESET_M:
+                            self.glance_run = 0
+                        self.glance_run += 1
+                        turn = (GLANCE_TURN_DEG, 60.0, BUMP_TURN_DEG)[
+                            min(self.glance_run, 3) - 1]
+                    self.glance_track = 0.0
                     if DEBUG:
-                        print("BUMP L={} R={} wall={:.2f} glancing={}".format(
-                            hit_left, hit_right, wall, glancing))
-                    self.begin_backup(GLANCE_TURN_DEG if glancing
-                                      else BUMP_TURN_DEG, "FOLLOW",
-                                      stall=not bumped)
+                        print("BUMP L={} R={} wall={:.2f} turn={:.0f}".format(
+                            hit_left, hit_right, wall, turn))
+                    self.begin_backup(turn, "FOLLOW", stall=not bumped)
                     continue
 
                 # LEAVE: closer to the goal than at the hit point, and the
