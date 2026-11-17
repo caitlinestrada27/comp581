@@ -46,13 +46,14 @@ START_THETA_DEG = 90.0      # direction the robot faces at the start,
                             # counter-clockwise from the +x axis
 GOAL_X_M = 2.50
 GOAL_Y_M = 2.50
-# Aim correction. Measured at normal speed: on two different courses it
-# stopped to the RIGHT of the goal (too far in +x) and SHORT of it (not far
-# enough in +y), 19 cm and 29 cm away. So it aims 10 cm left and 10 cm
-# further forward.
+# Aim correction, from four runs at normal speed on two courses.
+#   y: always short by about 10 cm -> aim 10 cm further (now spot on).
+#   x: without correction 16 and 27 cm right; with 10 cm left correction
+#      20 and 12 cm left. So x varies about 25 cm from run to run; 7 cm left
+#      is the middle of all four runs.
 # To refine: AIM_SHIFT = goal - where it really stopped, averaged over a
 # few runs. Set both to 0.0 to aim at the goal exactly.
-AIM_SHIFT_X_M = -0.10
+AIM_SHIFT_X_M = -0.07
 AIM_SHIFT_Y_M = 0.10
 AIM_X_M = GOAL_X_M + AIM_SHIFT_X_M     # the point the robot drives to
 AIM_Y_M = GOAL_Y_M + AIM_SHIFT_Y_M
