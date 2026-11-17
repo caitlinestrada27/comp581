@@ -1,7 +1,6 @@
 #!/usr/bin/env pybricks-micropython
 # COMP 581 Lab 4: Bug Race
 # Caitlin Estrada (730661469) and Madeline Clark (730650946)
-# Team number: __
 #
 # Strategy (a "Bug" algorithm built on our Lab 3 wall follower)
 #   The robot keeps track of where it is (x, y in the lab's coordinates)
@@ -47,13 +46,14 @@ START_THETA_DEG = 90.0      # direction the robot faces at the start,
                             # counter-clockwise from the +x axis
 GOAL_X_M = 2.50
 GOAL_Y_M = 2.50
-# Aim correction. Measured on the robot: it stops to the RIGHT of the goal
-# (too far in +x) and SHORT of it (not far enough in +y), by 26-28 cm.
-# So it aims at a point shifted the other way: left and further forward.
-# To set from measurements: AIM_SHIFT = goal - where it really stopped,
-# averaged over a few runs. Set both to 0.0 to aim at the goal exactly.
-AIM_SHIFT_X_M = 0.0         # tuned at fast speed; reset for normal speed
-AIM_SHIFT_Y_M = 0.0
+# Aim correction. Measured at normal speed: on two different courses it
+# stopped to the RIGHT of the goal (too far in +x) and SHORT of it (not far
+# enough in +y), 19 cm and 29 cm away. So it aims 10 cm left and 10 cm
+# further forward.
+# To refine: AIM_SHIFT = goal - where it really stopped, averaged over a
+# few runs. Set both to 0.0 to aim at the goal exactly.
+AIM_SHIFT_X_M = -0.10
+AIM_SHIFT_Y_M = 0.10
 AIM_X_M = GOAL_X_M + AIM_SHIFT_X_M     # the point the robot drives to
 AIM_Y_M = GOAL_Y_M + AIM_SHIFT_Y_M
 
