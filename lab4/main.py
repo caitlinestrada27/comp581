@@ -105,7 +105,8 @@ MEASURE_SIDE_M = 0.0        # measuring point's distance LEFT of the
 #     own calibration: GO_DISTANCE_SCALE below. CALIBRATE IT FIRST.
 #   FAST_OBSTACLES: wall following, corners, hits. Fast made the position
 #     estimate worse on the robot (37 cm miss vs 15 cm), so it is off.
-FAST_STRAIGHT = True        # faster straight runs (see GO_DISTANCE_SCALE)
+FAST_STRAIGHT = False       # off for the lab: every speed-up so far cost
+                            # accuracy (26-34 cm) vs 15 cm at normal speed
 FAST_OBSTACLES = False
 
 
@@ -396,7 +397,7 @@ class Robot:
         self.prev_left = l
         self.prev_right = r
         self.d_center = (d_l + d_r) / 2.0
-        if self.state == "GO" or self.calibrating:
+        if FAST_STRAIGHT and (self.state == "GO" or self.calibrating):
             self.d_center *= GO_DISTANCE_SCALE
         enc_d = math.degrees((d_l - d_r) / WHEEL_BASE_M)
         self.enc_turn += enc_d
@@ -850,9 +851,10 @@ class Robot:
                     # Full speed until close, then slow to a crawl so the
                     # stop is exact.
                     speed = clamp(tip_d * GOAL_SLOWDOWN, 50.0, GO_SPEED)
-                    # Gentle speed-up: sudden starts make the wheels slip.
-                    speed = min(speed, 100.0 + ACCEL
-                                * (now - self.state_start_ms) / 1000.0)
+                    if FAST_STRAIGHT:
+                        # Gentle speed-up: sudden starts make wheels slip.
+                        speed = min(speed, 100.0 + ACCEL
+                                    * (now - self.state_start_ms) / 1000.0)
                     turn = clamp(2.5 * err, -0.4 * speed, 0.4 * speed)
                     self.steer(speed, turn)
 
