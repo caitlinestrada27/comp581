@@ -81,22 +81,31 @@ MEASURE_SIDE_M = 0.0        # measuring point's distance LEFT of the
                             # it is in the middle of the front.
 
 # ================================= SPEED =================================
-# Two knobs. The values here are the speeds tested on the robot so far.
-# Faster means harder hits and more wheel slip, so the position estimate
-# gets worse: change ONE step at a time and check the stop is still close.
-#   Step 1: GO_SPEED = 420.0            (straight runs at the goal)
-#   Step 2: SPEED = 1.15                (wall following, turns, backing up)
-# In simulation step 1 + step 2 cut total time by about 18%; going further
-# (SPEED 1.3 or more) caused extra bumps and saved almost nothing.
-GO_SPEED = 260.0            # wheel deg/s when driving at the goal
-SPEED = 1.0                 # multiplier for everything else
+# FAST = True uses the faster settings (about a third quicker in simulation).
+# FAST = False goes back to the speeds the accuracy tests were done at.
+# Each speed is wheel degrees per second: (normal, fast).
+FAST = True
+
+
+def pick(normal, fast):
+    return fast if FAST else normal
+
+
+GO_SPEED = pick(260.0, 600.0)          # straight runs at the goal
+FOLLOW_SPEED = pick(260.0, 300.0)      # wall following
+ARC_SPEED = pick(210.0, 300.0)         # straight probes at corners
+CORNER_TURN_SPEED = pick(160.0, 230.0) # pivots at corners
+TURN_SPEED = pick(200.0, 320.0)        # pivots after a hit / to face goal
+REVERSE_SPEED = pick(150.0, 250.0)     # backing up after a hit
+BACKUP_DIST_M = pick(0.08, 0.06)       # how far to back up after a hit
+GOAL_SLOWDOWN = pick(900.0, 1500.0)    # final approach: wheel deg/s per
+                                       # meter left (higher = full speed
+                                       # until closer to the goal)
 
 # ============================ WALL FOLLOWING =============================
 TARGET_DIST_M = 0.09        # desired sonar reading while following
 LOST_DIST_M = 0.30          # reading above this = wall not visible
 TOO_CLOSE_M = 0.06          # below this always steer away
-FOLLOW_SPEED = 260.0 * SPEED        # wheel deg/s (about 14 cm/s)
-ARC_SPEED = 210.0 * SPEED           # wheel deg/s during corner probes
 K_ANGLE = 2.4               # how hard to correct the angle to the wall (1/s)
 K_DIST = 4.0                # approach angle (rad) per meter of distance error
 MAX_APPROACH_DEG = 10.0     # never angle in/out more steeply than this
@@ -114,13 +123,9 @@ CORNER_STEP_DEG = 30.0      # left pivot between straight probes
 CORNER_PAST_M = 0.0         # sonar must be this far past the corner (along
                             # the current heading) before a reading counts
 CORNER_CONFIRM_M = 0.04     # ...and the wall must stay visible this far
-CORNER_TURN_SPEED = 160.0 * SPEED   # wheel deg/s while pivoting
 CORNER_MAX_TURN_DEG = 300.0 # give up if nearly a full circle finds no wall
 
 # ============================ OTHER MOTIONS ==============================
-REVERSE_SPEED = 150.0 * SPEED
-TURN_SPEED = 200.0 * SPEED
-BACKUP_DIST_M = 0.08
 BUMP_TURN_DEG = 90.0        # right turn after a head-on bumper hit
 SEEK_EXTRA_DEG = 15.0       # after a hit on the way to the goal: stop turning
 SEEK_MIN_DEG = 20.0         # this far after the sonar first sees the wall
@@ -286,6 +291,11 @@ class Robot:
     def stop(self):
         self.left_motor.stop()
         self.right_motor.stop()
+
+    def halt(self):
+        """Stop dead (brake) instead of coasting: used for the final stop."""
+        self.left_motor.brake()
+        self.right_motor.brake()
 
     def steer(self, speed, turn):
         # Positive turn curves RIGHT; negative turn curves LEFT.
@@ -802,9 +812,9 @@ class Robot:
                     self.begin_turn(err, "GO")     # aim again
                     self.go_min_tip = 99.0
                 else:
-                    # Full speed until 30 cm out, then slow to a crawl
-                    # so the stop is exact.
-                    speed = clamp(tip_d * 900.0, 50.0, GO_SPEED)
+                    # Full speed until close, then slow to a crawl so the
+                    # stop is exact.
+                    speed = clamp(tip_d * GOAL_SLOWDOWN, 50.0, GO_SPEED)
                     turn = clamp(2.5 * err, -0.4 * speed, 0.4 * speed)
                     self.steer(speed, turn)
 
@@ -987,7 +997,7 @@ class Robot:
                           .format(self.mode, now / 1000.0, self.x, self.y,
                                   goal_d, err, wall))
 
-        self.stop()
+        self.halt()
         print("STOPPED {} t={:.1f} x={:.2f} y={:.2f} tip_to_goal={:.2f}".format(
             self.outcome, self.clock.time() / 1000.0, self.x, self.y,
             self.tip_dist_to_goal()))
