@@ -61,6 +61,10 @@ AIM_Y_M = GOAL_Y_M + AIM_SHIFT_Y_M
 # DISTANCE: set CALIBRATE_STRAIGHT = True and run. The robot drives what it
 #   believes is exactly 1.000 m. Measure what it really drove (D meters) and
 #   set  DISTANCE_SCALE = DISTANCE_SCALE * D.  Repeat until it drives 1.00 m.
+#   The calibration drives at the straight-run speed (GO_SPEED). With
+#   FAST_STRAIGHT = True, adjust GO_DISTANCE_SCALE instead:
+#   GO_DISTANCE_SCALE = GO_DISTANCE_SCALE * D. (DISTANCE_SCALE = 0.85 was
+#   measured at normal speed and is still right for wall following.)
 #   (Wheels sink into carpet and slip a little, so the distance covered per
 #   wheel turn is less than the wheel's measured size suggests.)
 # HEADING comes from the gyro on S1 (USE_GYRO = True). Its direction is
@@ -75,6 +79,10 @@ CALIBRATE_STRAIGHT = False
 CALIBRATE_SPIN = False
 USE_GYRO = True
 DISTANCE_SCALE = 0.85       # real distance / distance from wheel size alone
+GO_DISTANCE_SCALE = 1.0     # extra correction used only while driving
+                            # straight at the goal (wheels slip more at
+                            # FAST_STRAIGHT speed). Leave DISTANCE_SCALE
+                            # alone and calibrate THIS with FAST_STRAIGHT on.
                             # (measured: drove 0.85 m when it believed 1.00 m)
 
 # ====================== MEASURE THESE ON YOUR ROBOT ======================
@@ -91,11 +99,13 @@ MEASURE_SIDE_M = 0.0        # measuring point's distance LEFT of the
 
 # ================================= SPEED =================================
 # Two switches. Each speed below is wheel degrees per second: (normal, fast).
-#   FAST_STRAIGHT: driving straight at the goal. With it on, misses were
-#     26-34 cm; at normal speed one run was 15 cm, so it is off.
+#   FAST_STRAIGHT: driving straight at the goal. The first try (600) missed
+#     by 26-34 cm, mostly SHORT, because the distance calibration had been
+#     measured at normal speed. Now 450, with a gentle speed-up, and its
+#     own calibration: GO_DISTANCE_SCALE below. CALIBRATE IT FIRST.
 #   FAST_OBSTACLES: wall following, corners, hits. Fast made the position
 #     estimate worse on the robot (37 cm miss vs 15 cm), so it is off.
-FAST_STRAIGHT = False       # off: accuracy matters more than time
+FAST_STRAIGHT = True        # faster straight runs (see GO_DISTANCE_SCALE)
 FAST_OBSTACLES = False
 
 
@@ -103,8 +113,8 @@ def pick(normal, fast, on):
     return fast if on else normal
 
 
-GO_SPEED = pick(260.0, 600.0, FAST_STRAIGHT)         # straight at the goal
-GOAL_SLOWDOWN = pick(900.0, 1500.0, FAST_STRAIGHT)   # final approach: wheel
+GO_SPEED = pick(260.0, 450.0, FAST_STRAIGHT)         # straight at the goal
+GOAL_SLOWDOWN = pick(900.0, 1200.0, FAST_STRAIGHT)   # final approach: wheel
                                        # deg/s per meter left (higher = full
                                        # speed until closer to the goal)
 FOLLOW_SPEED = pick(260.0, 300.0, FAST_OBSTACLES)      # wall following
@@ -114,6 +124,8 @@ TURN_SPEED = pick(200.0, 320.0, FAST_OBSTACLES)        # pivots after a hit
                                                        # and to face the goal
 REVERSE_SPEED = pick(150.0, 250.0, FAST_OBSTACLES)     # backing up after a hit
 BACKUP_DIST_M = pick(0.08, 0.06, FAST_OBSTACLES)       # back-up distance
+ACCEL = 500.0               # straight runs speed up by at most this many
+                            # wheel deg/s each second (less wheel slip)
 
 # ============================ WALL FOLLOWING =============================
 TARGET_DIST_M = 0.09        # desired sonar reading while following
@@ -243,6 +255,7 @@ class Robot:
         self.prev_right = 0
 
         self.state = "GO"
+        self.calibrating = False
         self.bump_x = 0.0
         self.bump_y = 0.0
         self.state_start_ms = 0
@@ -383,6 +396,8 @@ class Robot:
         self.prev_left = l
         self.prev_right = r
         self.d_center = (d_l + d_r) / 2.0
+        if self.state == "GO" or self.calibrating:
+            self.d_center *= GO_DISTANCE_SCALE
         enc_d = math.degrees((d_l - d_r) / WHEEL_BASE_M)
         self.enc_turn += enc_d
         if self.gyro_sign != 0:
@@ -744,14 +759,21 @@ class Robot:
     def calibration_run(self):
         if CALIBRATE_STRAIGHT:
             # Drive what the robot believes is exactly 1.000 m.
+            # Same speed-up and slow-down as a real straight run, then
+            # brake, so coasting does not add to the measured distance.
+            self.calibrating = True
             x0, y0 = self.x, self.y
             while (self.dist_to(x0, y0) < 1.0
                    and self.clock.time() < 20000):
+                left = 1.0 - self.dist_to(x0, y0)
+                speed = clamp(left * GOAL_SLOWDOWN, 50.0, GO_SPEED)
+                speed = min(speed, 100.0 + ACCEL * self.clock.time() / 1000.0)
                 turn = clamp(-3.0 * self.enc_turn, -40, 40)
-                self.steer(GO_SPEED, turn)
+                self.steer(speed, turn)
                 wait(LOOP_MS)
                 self.update_odometry()
-            self.stop()
+            self.halt()
+            self.calibrating = False
             self.say("DROVE 1.00 m?")
         else:
             # Spin what the robot believes is exactly 360 degrees right.
@@ -828,6 +850,9 @@ class Robot:
                     # Full speed until close, then slow to a crawl so the
                     # stop is exact.
                     speed = clamp(tip_d * GOAL_SLOWDOWN, 50.0, GO_SPEED)
+                    # Gentle speed-up: sudden starts make the wheels slip.
+                    speed = min(speed, 100.0 + ACCEL
+                                * (now - self.state_start_ms) / 1000.0)
                     turn = clamp(2.5 * err, -0.4 * speed, 0.4 * speed)
                     self.steer(speed, turn)
 
