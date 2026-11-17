@@ -46,6 +46,15 @@ START_THETA_DEG = 90.0      # direction the robot faces at the start,
                             # counter-clockwise from the +x axis
 GOAL_X_M = 2.50
 GOAL_Y_M = 2.50
+# Aim correction. Measured on the robot: it stops to the RIGHT of the goal
+# (too far in +x) and SHORT of it (not far enough in +y), by 26-28 cm.
+# So it aims at a point shifted the other way: left and further forward.
+# To set from measurements: AIM_SHIFT = goal - where it really stopped,
+# averaged over a few runs. Set both to 0.0 to aim at the goal exactly.
+AIM_SHIFT_X_M = -0.15
+AIM_SHIFT_Y_M = 0.15
+AIM_X_M = GOAL_X_M + AIM_SHIFT_X_M     # the point the robot drives to
+AIM_Y_M = GOAL_Y_M + AIM_SHIFT_Y_M
 
 # ============================== CALIBRATION ==============================
 # Reaching the goal depends on measuring distance and heading correctly.
@@ -412,8 +421,8 @@ class Robot:
     def tip_dist_to_goal(self):
         """Distance from the measuring point to the goal."""
         tip_x, tip_y = self.tip_pos()
-        dx = tip_x - GOAL_X_M
-        dy = tip_y - GOAL_Y_M
+        dx = tip_x - AIM_X_M
+        dy = tip_y - AIM_Y_M
         return math.sqrt(dx * dx + dy * dy)
 
     def bearing_error_to(self, px, py):
@@ -474,7 +483,7 @@ class Robot:
     def begin_go(self):
         """Face the goal, then drive at it."""
         self.go_min_tip = 99.0
-        err = self.bearing_error_to(GOAL_X_M, GOAL_Y_M)
+        err = self.bearing_error_to(AIM_X_M, AIM_Y_M)
         if abs(err) > 8.0:
             self.begin_turn(err, "GO")
         else:
@@ -777,9 +786,9 @@ class Robot:
             hit_left = self.touch_left.pressed()
             hit_right = self.touch_right.pressed()
             bumped = hit_left or hit_right
-            goal_d = self.dist_to(GOAL_X_M, GOAL_Y_M)      # from the axle
+            goal_d = self.dist_to(AIM_X_M, AIM_Y_M)      # from the axle
             tip_d = self.tip_dist_to_goal()                # from the tip
-            err = self.bearing_error_to(GOAL_X_M, GOAL_Y_M)
+            err = self.bearing_error_to(AIM_X_M, AIM_Y_M)
 
             if self.state == "GO":
                 # The bumper is narrow: an angled wall can stop the robot
