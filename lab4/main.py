@@ -51,8 +51,8 @@ GOAL_Y_M = 2.50
 # So it aims at a point shifted the other way: left and further forward.
 # To set from measurements: AIM_SHIFT = goal - where it really stopped,
 # averaged over a few runs. Set both to 0.0 to aim at the goal exactly.
-AIM_SHIFT_X_M = -0.08        # was -0.15: one-obstacle run then stopped 32 cm left
-AIM_SHIFT_Y_M = 0.15
+AIM_SHIFT_X_M = 0.0         # tuned at fast speed; reset for normal speed
+AIM_SHIFT_Y_M = 0.0
 AIM_X_M = GOAL_X_M + AIM_SHIFT_X_M     # the point the robot drives to
 AIM_Y_M = GOAL_Y_M + AIM_SHIFT_Y_M
 
@@ -91,10 +91,11 @@ MEASURE_SIDE_M = 0.0        # measuring point's distance LEFT of the
 
 # ================================= SPEED =================================
 # Two switches. Each speed below is wheel degrees per second: (normal, fast).
-#   FAST_STRAIGHT: driving straight at the goal. Fast tested fine.
+#   FAST_STRAIGHT: driving straight at the goal. With it on, misses were
+#     26-34 cm; at normal speed one run was 15 cm, so it is off.
 #   FAST_OBSTACLES: wall following, corners, hits. Fast made the position
 #     estimate worse on the robot (37 cm miss vs 15 cm), so it is off.
-FAST_STRAIGHT = True
+FAST_STRAIGHT = False       # off: accuracy matters more than time
 FAST_OBSTACLES = False
 
 
