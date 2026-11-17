@@ -1,13 +1,13 @@
 #!/usr/bin/env pybricks-micropython
 # COMP 581 Lab 4: Bug Race
 # Caitlin Estrada (730661469) and Madeline Clark (730650946)
-
+#
 # Strategy (a "Bug" algorithm built on our Lab 3 wall follower)
 #   The robot keeps track of where it is (x, y in the lab's coordinates)
 #   from the wheel encoders, with heading from the gyro.
 #   GO      face the goal and drive straight at it. Stop and beep when the
 #           measuring point (bumper tip) reaches the goal point.
-#   Bumper hit on the way (the "hit point") -> remember how far the goal
+#   Either bumper (left on S2, right on S3) hit on the way (the "hit point") -> remember how far the goal
 #           was, BACKUP, then TURN right until the sonar sees the wall on
 #           the LEFT (at most 90 deg).
 #   Robot stalled without the bumper being pressed -> its side is scraping
@@ -74,7 +74,11 @@ WHEEL_BASE_M = 0.127        # distance between the two wheel contact patches
 SONAR_AHEAD_M = -0.06       # sonar position along the robot, measured from
                             # the wheel axle: + = in front, - = BEHIND it
 SONAR_SIDE_M = 0.075        # robot centerline to the sonar's front face
-MEASURE_AHEAD_M = 0.06      # axle to measuring point (tip of the bumper)
+MEASURE_AHEAD_M = 0.10      # wheel axle to measuring point, along the
+                            # direction of travel (measured: 10 cm)
+MEASURE_SIDE_M = 0.0        # measuring point's distance LEFT of the
+                            # robot's centreline (negative = right). 0 if
+                            # it is in the middle of the front.
 
 # ================================= SPEED =================================
 # Two knobs. The values here are the speeds tested on the robot so far.
@@ -187,7 +191,8 @@ class Robot:
         self.ev3 = EV3Brick()
         self.left_motor = Motor(Port.C)
         self.right_motor = Motor(Port.D)
-        self.touch = TouchSensor(Port.S3)
+        self.touch_left = TouchSensor(Port.S2)    # left front bumper
+        self.touch_right = TouchSensor(Port.S3)   # right front bumper
         self.sonar = UltrasonicSensor(Port.S4)
         self.gyro = None
         if USE_GYRO:
@@ -206,9 +211,13 @@ class Robot:
         # Pose in lab coordinates: (x, y) of the middle of the wheel axle.
         # heading_cw is continuous (not wrapped), in degrees, positive when
         # the robot has turned RIGHT since the start.
+        # The measuring point starts on the start point, so the axle is
+        # MEASURE_AHEAD_M behind it (and MEASURE_SIDE_M to its right).
         start = math.radians(START_THETA_DEG)
-        self.x = START_X_M - MEASURE_AHEAD_M * math.cos(start)
-        self.y = START_Y_M - MEASURE_AHEAD_M * math.sin(start)
+        self.x = (START_X_M - MEASURE_AHEAD_M * math.cos(start)
+                  + MEASURE_SIDE_M * math.sin(start))
+        self.y = (START_Y_M - MEASURE_AHEAD_M * math.sin(start)
+                  - MEASURE_SIDE_M * math.cos(start))
         self.heading_cw = 0.0
         self.d_center = 0.0     # forward travel during the last loop
         self.d_heading = 0.0    # heading change during the last loop
@@ -306,10 +315,8 @@ class Robot:
         else:
             self.ev3.light.on(Color.RED)
             tune = SAD_TUNE
-        a = self.theta()
-        tip_x = self.x + MEASURE_AHEAD_M * math.cos(a)
-        tip_y = self.y + MEASURE_AHEAD_M * math.sin(a)
-        facing = wrap_degrees(math.degrees(a))
+        tip_x, tip_y = self.tip_pos()
+        facing = wrap_degrees(math.degrees(self.theta()))
         # Five lines only: more than that scrolls off the EV3 screen.
         lines = [
             "{} {:.0f}s".format(self.outcome.upper(), seconds),
@@ -381,11 +388,19 @@ class Robot:
         dy = self.y - py
         return math.sqrt(dx * dx + dy * dy)
 
-    def tip_dist_to_goal(self):
-        """Distance from the measuring point (bumper tip) to the goal."""
+    def tip_pos(self):
+        """Where the measuring point is, from the axle position and heading."""
         a = self.theta()
-        dx = self.x + MEASURE_AHEAD_M * math.cos(a) - GOAL_X_M
-        dy = self.y + MEASURE_AHEAD_M * math.sin(a) - GOAL_Y_M
+        return (self.x + MEASURE_AHEAD_M * math.cos(a)
+                - MEASURE_SIDE_M * math.sin(a),
+                self.y + MEASURE_AHEAD_M * math.sin(a)
+                + MEASURE_SIDE_M * math.cos(a))
+
+    def tip_dist_to_goal(self):
+        """Distance from the measuring point to the goal."""
+        tip_x, tip_y = self.tip_pos()
+        dx = tip_x - GOAL_X_M
+        dy = tip_y - GOAL_Y_M
         return math.sqrt(dx * dx + dy * dy)
 
     def bearing_error_to(self, px, py):
@@ -746,7 +761,9 @@ class Robot:
 
             self.update_odometry()
             wall = self.read_wall()
-            bumped = self.touch.pressed()
+            hit_left = self.touch_left.pressed()
+            hit_right = self.touch_right.pressed()
+            bumped = hit_left or hit_right
             goal_d = self.dist_to(GOAL_X_M, GOAL_Y_M)      # from the axle
             tip_d = self.tip_dist_to_goal()                # from the tip
             err = self.bearing_error_to(GOAL_X_M, GOAL_Y_M)
@@ -925,13 +942,17 @@ class Robot:
                         print("YAW HIT gap={:.0f}".format(self.yaw_gap))
                     stuck = True
                 if bumped or stuck:
-                    # Scraping the wall we are following needs only a small
-                    # turn away; a wall straight ahead needs the full 90.
-                    glancing = self.mode == "TRACK" and wall <= GLANCE_DIST_M
+                    # Scraping the wall we are following (it is on the
+                    # LEFT, so only the left bumper is pressed, or the sonar
+                    # reads very close) needs only a small turn away; a wall
+                    # ahead (right bumper pressed) needs the full 90.
+                    glancing = self.mode == "TRACK" and (
+                        (hit_left and not hit_right)
+                        or (not bumped and wall <= GLANCE_DIST_M))
                     self.bumps += 1
                     if DEBUG:
-                        print("BUMP wall={:.2f} glancing={}".format(
-                            wall, glancing))
+                        print("BUMP L={} R={} wall={:.2f} glancing={}".format(
+                            hit_left, hit_right, wall, glancing))
                     self.begin_backup(GLANCE_TURN_DEG if glancing
                                       else BUMP_TURN_DEG, "FOLLOW",
                                       stall=not bumped)
