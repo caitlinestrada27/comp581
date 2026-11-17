@@ -81,26 +81,29 @@ MEASURE_SIDE_M = 0.0        # measuring point's distance LEFT of the
                             # it is in the middle of the front.
 
 # ================================= SPEED =================================
-# FAST = True uses the faster settings (about a third quicker in simulation).
-# FAST = False goes back to the speeds the accuracy tests were done at.
-# Each speed is wheel degrees per second: (normal, fast).
-FAST = True
+# Two switches. Each speed below is wheel degrees per second: (normal, fast).
+#   FAST_STRAIGHT: driving straight at the goal. Fast tested fine.
+#   FAST_OBSTACLES: wall following, corners, hits. Fast made the position
+#     estimate worse on the robot (37 cm miss vs 15 cm), so it is off.
+FAST_STRAIGHT = True
+FAST_OBSTACLES = False
 
 
-def pick(normal, fast):
-    return fast if FAST else normal
+def pick(normal, fast, on):
+    return fast if on else normal
 
 
-GO_SPEED = pick(260.0, 600.0)          # straight runs at the goal
-FOLLOW_SPEED = pick(260.0, 300.0)      # wall following
-ARC_SPEED = pick(210.0, 300.0)         # straight probes at corners
-CORNER_TURN_SPEED = pick(160.0, 230.0) # pivots at corners
-TURN_SPEED = pick(200.0, 320.0)        # pivots after a hit / to face goal
-REVERSE_SPEED = pick(150.0, 250.0)     # backing up after a hit
-BACKUP_DIST_M = pick(0.08, 0.06)       # how far to back up after a hit
-GOAL_SLOWDOWN = pick(900.0, 1500.0)    # final approach: wheel deg/s per
-                                       # meter left (higher = full speed
-                                       # until closer to the goal)
+GO_SPEED = pick(260.0, 600.0, FAST_STRAIGHT)         # straight at the goal
+GOAL_SLOWDOWN = pick(900.0, 1500.0, FAST_STRAIGHT)   # final approach: wheel
+                                       # deg/s per meter left (higher = full
+                                       # speed until closer to the goal)
+FOLLOW_SPEED = pick(260.0, 300.0, FAST_OBSTACLES)      # wall following
+ARC_SPEED = pick(210.0, 300.0, FAST_OBSTACLES)         # probes at corners
+CORNER_TURN_SPEED = pick(160.0, 230.0, FAST_OBSTACLES) # pivots at corners
+TURN_SPEED = pick(200.0, 320.0, FAST_OBSTACLES)        # pivots after a hit
+                                                       # and to face the goal
+REVERSE_SPEED = pick(150.0, 250.0, FAST_OBSTACLES)     # backing up after a hit
+BACKUP_DIST_M = pick(0.08, 0.06, FAST_OBSTACLES)       # back-up distance
 
 # ============================ WALL FOLLOWING =============================
 TARGET_DIST_M = 0.09        # desired sonar reading while following
