@@ -224,15 +224,15 @@ def wrap_degrees(angle):
 class Robot:
     def __init__(self):
         self.ev3 = EV3Brick()
-        self.left_motor = Motor(Port.C)
-        self.right_motor = Motor(Port.D)
-        self.touch_left = TouchSensor(Port.S2)    # left front bumper
-        self.touch_right = TouchSensor(Port.S3)   # right front bumper
-        self.sonar = UltrasonicSensor(Port.S4)
+        self.left_motor = Motor(port = Port.C)
+        self.right_motor = Motor(port = Port.D)
+        self.touch_left = TouchSensor(port = Port.S2)    # left front bumper
+        self.touch_right = TouchSensor(port = Port.S3)   # right front bumper
+        self.sonar = UltrasonicSensor(port = Port.S4)
         self.gyro = None
         if USE_GYRO:
             try:
-                self.gyro = GyroSensor(Port.S1)
+                self.gyro = GyroSensor(port = Port.S1)
             except Exception:
                 print("NO GYRO ON S1 - using wheel encoders")
         self.gyro_sign = 0      # 0 = gyro not trusted yet, else +1 / -1
